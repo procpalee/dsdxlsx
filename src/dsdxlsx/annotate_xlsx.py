@@ -204,23 +204,38 @@ def annotate(xlsx_path: str, report: CheckReport, doc: Document, row_positions: 
         row_sums = [x for x in results if x.axis == "row" and x.check != "C4"]
         cross = [x for x in results if x.check == "C4"]
 
-        # 오른쪽 열 배치: 합계검증(가로) → 대사검증 순
+        # 오른쪽 검증 열: 합계검증(세로: 데이터열별) → 합계검증(가로) → 대사검증.
+        # 세로검증도 각 합계·소계 행에 개별로 배치한다 (한 셀에 AND로 몰지 않음).
         vcol = 2 + table.ncols + 1
         col_map: dict[tuple, int] = {}  # (헤더, grid_col) → 엑셀 열
-        for header, group in (("합계검증", row_sums), ("대사검증", cross)):
-            for gc in sorted({x.grid_col for x in group}):
+
+        def _add_cols(header, group, with_subhdr):
+            nonlocal vcol
+            hdr_of: dict[int, str] = {}
+            for x in group:
+                hdr_of.setdefault(x.grid_col, x.col_header)
+            for gc in sorted(hdr_of):
                 col_map[(header, gc)] = vcol
                 letter = get_column_letter(vcol)
-                h = ws.cell(row=head_row, column=vcol, value=header)
-                _style(h, FONT_SUBHEAD,
-                       align=Alignment(horizontal="center", vertical="center"))
+                sub = hdr_of[gc] if with_subhdr else ""
+                title = f"{header}\n{sub}" if sub else header
+                h = ws.cell(row=head_row, column=vcol, value=title)
+                _style(h, FONT_SUBHEAD, align=Alignment(
+                    horizontal="center", vertical="center", wrap_text=True))
                 h.fill = FILL_SUBHEAD
-                ws.column_dimensions[letter].width = 13
+                ws.column_dimensions[letter].width = 12
                 _cf(ws, f"{letter}{head_row + 1}:{letter}{last_row}",
                     f"{letter}{head_row + 1}")
                 vcol += 1
 
-        for header, group in (("합계검증", row_sums), ("대사검증", cross)):
+        # 세로는 데이터 열마다 별도 열(라벨에 기간 표기), 가로·대사는 단순 헤더
+        _add_cols("합계검증(세로)", col_axis, True)
+        _add_cols("합계검증(가로)", row_sums, False)
+        _add_cols("대사검증", cross, False)
+
+        for header, group in (("합계검증(세로)", col_axis),
+                              ("합계검증(가로)", row_sums),
+                              ("대사검증", cross)):
             merged: dict[tuple, list] = {}
             for x in group:
                 merged.setdefault((x.row_id, x.grid_col), []).append(x)
@@ -233,57 +248,6 @@ def annotate(xlsx_path: str, report: CheckReport, doc: Document, row_positions: 
                 for x in xs:
                     addr_of[id(x)] = (sheet, cell.coordinate)
                 written += 1
-
-        # 표 아래 세로 검증 행 (표 뒤 빈 행 1개를 사용 — 행 삽입 없음)
-        if col_axis:
-            brow = last_row + 1
-            ws.cell(row=brow, column=1, value=f"!c{tid}").font = FONT
-            label = ws.cell(row=brow, column=2, value="▲ 합계검증(세로)")
-            _style(label, FONT_SUBHEAD, border=False)
-            by_gc: dict[int, list] = {}
-            for x in col_axis:
-                by_gc.setdefault(x.grid_col, []).append(x)
-            for gc, xs in sorted(by_gc.items()):
-                cell = ws.cell(row=brow, column=2 + gc)
-                if len(xs) == 1:
-                    x = xs[0]
-                    loc = pos_of.get(x.row_id)
-                    target = (f"{get_column_letter(2 + gc)}{loc[1]}"
-                              if loc and loc[0] == head_sheet else None)
-                    _write_check_cell(cell, xs, head_sheet, target or "")
-                else:
-                    # 같은 열에 검사 여러 개(소계+합계 등) → AND 결합 수식
-                    conds, fallback_bad = [], None
-                    for x in xs:
-                        loc = pos_of.get(x.row_id)
-                        if not (x.terms and loc and loc[0] == head_sheet):
-                            conds = []
-                            break
-                        target = f"{get_column_letter(2 + gc)}{loc[1]}"
-                        f = _sum_formula(x, pos_of, head_sheet, target)
-                        if not f:
-                            conds = []
-                            break
-                        conds.append(f[4:-1].rsplit(",TRUE,", 1)[0])  # 'T=(expr)' 추출
-                        if not x.ok:
-                            fallback_bad = x
-                    if conds and len(",".join(conds)) < 7000:
-                        cell.value = f'=IF(AND({",".join(conds)}),TRUE,"불일치")'
-                    else:
-                        bad = fallback_bad or next((x for x in xs if not x.ok), None)
-                        cell.value = (True if bad is None else
-                                      (_num(bad.stated) - _num(bad.computed)
-                                       if bad.computed is not None else "불일치"))
-                        if bad is not None and bad.computed is not None:
-                            cell.number_format = NUMFMT_INT
-                    _style(cell, _FONT_OK,
-                           align=Alignment(horizontal="center", vertical="center"))
-                for x in xs:
-                    addr_of[id(x)] = (head_sheet, cell.coordinate)
-                written += 1
-            first_l = get_column_letter(2 + min(by_gc))
-            last_l = get_column_letter(2 + max(by_gc))
-            _cf(ws, f"{first_l}{brow}:{last_l}{brow}", f"{first_l}{brow}")
 
     # ── 주석 시트 하단 대사 블록 (C4·C5) ─────────────────────────
     written += _write_note_blocks(wb, report, pos_of, note_sheets, note_ranges, block_start)
