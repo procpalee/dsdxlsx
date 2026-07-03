@@ -1,0 +1,17 @@
+# 고객 실데이터 — 절대 커밋 금지 (허브 CLAUDE.md 데이터 보안 규칙)
+*.dsd
+*.xlsx
+contents.xml
+meta.xml
+samples/
+sample/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+uv.lock
+calib*.txt
+검증출력/
+tests/sample_exceptions.py
