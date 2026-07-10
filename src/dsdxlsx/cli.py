@@ -46,6 +46,17 @@ def cmd_import(args) -> int:
             print(f"  행 삭제 {len(report.row_deletes)}건:")
             for line in report.row_deletes:
                 print(f"    - {line}")
+        for label, items in (("표 신설", report.table_inserts),
+                             ("표 삭제", report.table_deletes),
+                             ("문단 신설", report.para_inserts),
+                             ("문단 삭제", report.para_deletes)):
+            if items:
+                print(f"  {label} {len(items)}건:")
+                for line in items:
+                    print(f"    - {line}")
+        if report.structural:
+            print("  [주의] 표/문단 구조가 바뀌었습니다 — 이 xlsx로 계속 편집하지 말고, "
+                  "생성된 DSD를 다시 export해 새 편집본을 받으세요 (표 ID 재부여).")
     for w in report.warnings:
         print(f"  [경고] {w}")
     if report.autosum_tables:

@@ -7,6 +7,12 @@ ID), 시트를 스캔해 편집 목록(셀 수정/행 추가/행 삭제)을 만�
 - A열 ID 있음 → 기존 행. 원본에 있는데 시트에 없음 → 삭제.
 - A열 ID 없는데 내용 있음 + 직전 항목이 같은 표의 행 → 신규 행(직전 행 뒤에 삽입).
 - 표 내 기존 ID 순서가 원본과 다르면(재배열) 에러 — v1 미지원.
+
+구조 편집(마커, B열 — markers.py 문법):
+- `#새표 [헤더=k] [원본=t###] [단위=원]` + 이어지는 A열 빈 행들 = 새 표 (주석 시트만)
+- `#표삭제`(표 첫 행 B열) / `#문단 텍스트` / `#문단삭제` — clone-only 합성(compose.py),
+  가드·바이트 규약은 blockops.py. 표 신설/삭제 후에는 표 ID가 재부여되므로
+  **재export로 새 편집본을 받는 것이 표준 워크플로** (row_positions는 내부 재대응).
 """
 from __future__ import annotations
 
@@ -19,6 +25,7 @@ from decimal import Decimal
 
 from openpyxl import load_workbook
 
+from . import blockops, compose, markers
 from . import grid as grid_mod
 from . import numbers, splice
 from .dsd_io import DsdPackage, read_dsd
@@ -46,14 +53,27 @@ class Report:
     cell_edits: list[str] = field(default_factory=list)
     row_inserts: list[str] = field(default_factory=list)
     row_deletes: list[str] = field(default_factory=list)
+    table_inserts: list[str] = field(default_factory=list)
+    table_deletes: list[str] = field(default_factory=list)
+    para_inserts: list[str] = field(default_factory=list)
+    para_deletes: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     autosum_tables: set[str] = field(default_factory=set)
     # 표별 시트 행 위치 (시트 순서 = 재변환 후 문서의 TR 순서와 1:1) — check 주석용
     row_positions: dict[str, list[tuple[str, int]]] = field(default_factory=dict)
+    # 구조 편집 내부 기록 — row_positions 재대응용
+    _inserted_tables: list[tuple[int, int, list]] = field(default_factory=list)
+    _deleted_tables: set[str] = field(default_factory=set)
+
+    @property
+    def structural(self) -> bool:
+        return bool(self.table_inserts or self.table_deletes
+                    or self.para_inserts or self.para_deletes)
 
     @property
     def changed(self) -> bool:
-        return bool(self.cell_edits or self.row_inserts or self.row_deletes)
+        return bool(self.cell_edits or self.row_inserts or self.row_deletes
+                    or self.structural)
 
 
 def _cell_value_to_text(value, like: str = "") -> str:
@@ -111,6 +131,194 @@ def scan_sheets(xlsx_path: str) -> list[SheetEntry]:
     return entries
 
 
+def _texts_of(entry: SheetEntry) -> dict[int, str]:
+    """마커 블록 내용 행 → grid 열별 텍스트 (B열 '##' 이스케이프 해제 포함)."""
+    out: dict[int, str] = {}
+    for col, value in entry.values.items():
+        if col < 2:
+            continue
+        if col == 2:
+            value = markers.unescape(value)
+        out[col - 2] = _cell_value_to_text(value)
+    return out
+
+
+def _finalize_new_table(doc: Document, p: dict, inserts: list, report: Report,
+                        errors: list[str]):
+    rows = p["entries"]
+    n_head = p["n_head"]
+    if len(rows) <= n_head:
+        errors.append(p["where"] + f"#새표: 헤더 {n_head}행 외에 본문 행이 없음 "
+                                   f"(내용 {len(rows)}행)")
+        return
+    spec = compose.NewTableSpec(
+        header_rows=[_texts_of(e) for e in rows[:n_head]],
+        body_rows=[_texts_of(e) for e in rows[n_head:]],
+        unit=p["marker"].args.get("단위"),
+        where=p["where"],
+    )
+    spec.sheet_rows = (
+        ([(p["sheet"], p["marker_row"])] if spec.unit else [])
+        + [(e.sheet, e.xlsx_row) for e in rows]
+    )
+    try:
+        tpl = compose.harvest(doc, p["template"], p["where"])
+        block = compose.compose_table(doc.data, tpl, spec)
+    except compose.ComposeError as e:
+        errors.append(str(e))
+        return
+    inserts.append((p["anchor"], block, spec.sheet_rows))
+    report.table_inserts.append(
+        f"[{p['sheet']}!{p['marker_row']}행] 새 표 — 본문 {len(rows) - n_head}행, "
+        f"템플릿 {p['template'].id}")
+
+
+def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report,
+                        errors: list[str]):
+    """마커(구조 편집)를 스트림에서 분리 — 반환: (일반 entry, 삽입 계획, 표/문단 삭제)."""
+    filtered: list[SheetEntry] = []
+    inserts: list[tuple[object, bytes, list | None]] = []
+    table_deletes: list[Table] = []
+    para_deletes: list = []
+    deleted_tables: set[str] = set()
+
+    prev_block = None   # 같은 시트의 직전 블록(Table|Node) — 삽입 앵커
+    last_table = None   # 같은 시트의 직전 표 — 기본 템플릿
+    prev_sheet: str | None = None
+    pending: dict | None = None  # 수집 중인 #새표 블록
+
+    def finalize_pending():
+        nonlocal pending
+        if pending is not None:
+            p, pending = pending, None
+            _finalize_new_table(doc, p, inserts, report, errors)
+
+    for entry in entries:
+        if entry.sheet != prev_sheet:
+            finalize_pending()
+            prev_block = None
+            last_table = None
+            prev_sheet = entry.sheet
+        where = f"[{entry.sheet}!{entry.xlsx_row}행] "
+        bval = entry.values.get(2)
+        mk = None
+        if markers.is_marker(bval):
+            try:
+                mk = markers.parse_marker(bval)
+            except markers.MarkerError as e:
+                errors.append(where + str(e))
+                continue
+
+        if pending is not None:
+            gap = entry.xlsx_row != pending["last_row"] + 1  # 빈 행 = 블록 종료
+            if mk is None and entry.row_id is None and not gap:
+                pending["entries"].append(entry)
+                pending["last_row"] = entry.xlsx_row
+                continue
+            finalize_pending()
+            if mk is not None and mk.kind == "표끝":
+                continue
+            # 이 entry는 아래에서 정상 처리
+
+        if mk is not None:
+            if mk.kind == "새표":
+                if not blockops.is_note_sheet(entry.sheet):
+                    errors.append(where + "#새표는 주석 시트에서만 지원 — 재무제표 본문 표 신설 금지")
+                    continue
+                if entry.row_id is not None:
+                    errors.append(where + "#새표 행의 A열은 비워야 함")
+                    continue
+                if prev_block is None:
+                    errors.append(where + "#새표 위에 기준 블록(기존 행)이 없어 삽입 위치를 알 수 없음")
+                    continue
+                if "원본" in mk.args:
+                    template = doc.tables.get(mk.args["원본"])
+                    if template is None:
+                        errors.append(where + f"원본 표 없음: {mk.args['원본']}")
+                        continue
+                else:
+                    template = last_table
+                    if template is None:
+                        errors.append(where + "같은 시트에 템플릿 표가 없음 — 원본=t### 지정 필요")
+                        continue
+                try:
+                    n_head = int(mk.args.get("헤더", "1"))
+                except ValueError:
+                    errors.append(where + f"헤더= 값이 숫자가 아님: {mk.args['헤더']}")
+                    continue
+                if n_head < 1:
+                    errors.append(where + "헤더=1 이상이어야 함")
+                    continue
+                pending = {"marker": mk, "anchor": prev_block, "template": template,
+                           "n_head": n_head, "entries": [], "where": where,
+                           "sheet": entry.sheet, "marker_row": entry.xlsx_row,
+                           "last_row": entry.xlsx_row}
+                continue
+            if mk.kind == "표끝":
+                errors.append(where + "#표끝 앞에 #새표가 없음")
+                continue
+            if mk.kind == "문단":
+                if not blockops.is_note_sheet(entry.sheet):
+                    errors.append(where + "#문단은 주석 시트에서만 지원")
+                    continue
+                if prev_block is None:
+                    errors.append(where + "#문단 위에 기준 블록(기존 행)이 없음")
+                    continue
+                inserts.append((prev_block, compose.compose_paragraph(mk.text), None))
+                report.para_inserts.append(f"[{entry.sheet}!{entry.xlsx_row}행] 새 문단")
+                continue
+            if mk.kind == "표삭제":
+                rid = entry.row_id or ""
+                if not ROW_ID_RE.match(rid) or rid not in doc.rows:
+                    errors.append(where + "#표삭제는 지우려는 표의 첫 행 B열에 쓰세요 (A열 ID 유지)")
+                    continue
+                if not blockops.is_note_sheet(entry.sheet):
+                    errors.append(where + "재무제표 본문 표는 삭제할 수 없음")
+                    continue
+                table = doc.tables[rid.split(".")[0]]
+                guard = blockops.table_delete_guard(table)
+                if guard:
+                    errors.append(where + f"표 {table.id}: {guard}")
+                    continue
+                if table.id not in deleted_tables:
+                    deleted_tables.add(table.id)
+                    table_deletes.append(table)
+                    report.table_deletes.append(f"{table.id} [{entry.sheet}]")
+                continue
+            if mk.kind == "문단삭제":
+                rid = entry.row_id or ""
+                node = doc.nodes.get(rid)
+                if node is None or not rid.startswith("p"):
+                    errors.append(where + "#문단삭제는 기존 문단 행(p###)의 B열에 쓰세요")
+                    continue
+                para_deletes.append(node)
+                report.para_deletes.append(f"{rid} [{entry.sheet}]")
+                continue
+            errors.append(where + f"#{mk.kind}은(는) 아직 지원하지 않음 — 주석 추가/삭제는 다음 단계")
+            continue
+
+        # 일반 행: '##' 이스케이프 해제 + 앵커/템플릿 추적
+        if isinstance(bval, str) and bval.startswith("##"):
+            entry.values[2] = bval[1:]
+        rid = entry.row_id
+        if rid and ROW_ID_RE.match(rid):
+            tid = rid.split(".")[0]
+            if tid in deleted_tables:
+                continue  # 삭제 표의 잔여 행은 무시
+            table = doc.tables.get(tid)
+            if table is not None:
+                prev_block = table
+                last_table = table
+        elif rid and (rid.startswith("p") or rid.startswith("!")):
+            node = doc.nodes.get(rid)
+            if node is not None:
+                prev_block = node
+        filtered.append(entry)
+
+    finalize_pending()
+    return filtered, inserts, table_deletes, para_deletes, deleted_tables
+
+
 def build_edits(
     doc: Document,
     entries: list[SheetEntry],
@@ -119,6 +327,11 @@ def build_edits(
     ops: list[splice.Op] = []
     report = Report()
     errors: list[str] = []
+
+    # 구조 편집(마커) 분리 — 남은 entries로 기존 셀/행 파이프라인 수행
+    entries, struct_inserts, table_deletes, para_deletes, deleted_tables = (
+        _extract_structures(doc, entries, report, errors))
+    report._deleted_tables = deleted_tables
 
     seen_table_items: dict[str, list] = {}  # table_id -> [(row_id|None, entry)]
     seen_row_ids: set[str] = set()
@@ -176,21 +389,64 @@ def build_edits(
         _process_table(doc, doc.tables[table_id], items, ops, report, errors)
 
     # 시트에서 통째로 사라진 표의 행 → 삭제로 처리하지 않고 에러 (실수 방지)
-    # 단, 애초에 내보내지 않은 표(표지·보고서 구획)는 원본 그대로 보존되므로 정상
+    # 단, 애초에 내보내지 않은 표(표지·보고서 구획)와 #표삭제로 명시 삭제된 표는 예외
     for rid, row in doc.rows.items():
         table_id = rid.split(".")[0]
         if table_id in seen_table_items or not doc.tables[table_id].rows:
             continue
+        if table_id in deleted_tables:
+            continue
         if exported_tables is not None and table_id not in exported_tables:
             continue
         errors.append(
-            f"표 {table_id} 전체가 시트에서 사라짐 — 표 단위 삭제는 지원하지 않음"
+            f"표 {table_id} 전체가 시트에서 사라짐 — 삭제하려면 표 첫 행 B열에 #표삭제"
         )
         break
+
+    # 구조 편집 op — 같은 앵커의 연속 삽입은 한 op로 묶어 시트 순서 보존
+    grouped: dict[int, list[bytes]] = {}
+    anchor_of: dict[int, object] = {}
+    key_order: list[int] = []
+    for anchor, block, sheet_rows in struct_inserts:
+        key = id(anchor)
+        if key not in grouped:
+            grouped[key] = []
+            anchor_of[key] = anchor
+            key_order.append(key)
+        grouped[key].append(block)
+        if sheet_rows is not None:  # 표 삽입 — row_positions 재대응용 기록
+            report._inserted_tables.append(
+                (anchor_of[key].end, len(report._inserted_tables), sheet_rows))
+    for key in key_order:
+        ops.append(blockops.insert_after_block(anchor_of[key], grouped[key]))
+    for table in table_deletes:
+        ops.append(blockops.plan_table_delete(doc, table))
+    for node in para_deletes:
+        ops.append(blockops.plan_para_delete(doc, node))
 
     if errors:
         raise ImportError_("\n".join(errors))
     return ops, report
+
+
+def _remap_row_positions(doc: Document, report: Report):
+    """표 신설/삭제 후 위치 기반 표 ID(t###)가 밀리므로, 재파싱 문서의 새 ID
+    순서에 맞춰 row_positions를 재대응한다 (annotate·check 연속성)."""
+    if not report._inserted_tables and not report._deleted_tables:
+        return
+    events: list[tuple[int, int, list | None]] = []
+    for t in doc.tables.values():
+        if t.id in report._deleted_tables:
+            continue
+        events.append((t.start, -1, report.row_positions.get(t.id)))
+    for pos, order, sheet_rows in report._inserted_tables:
+        events.append((pos, order, sheet_rows))
+    events.sort(key=lambda e: (e[0], e[1]))
+    report.row_positions = {
+        f"t{i:03d}": rows
+        for i, (_, _, rows) in enumerate(events, 1)
+        if rows is not None
+    }
 
 
 def _process_table(doc, table: Table, items, ops, report, errors):
@@ -377,4 +633,5 @@ def import_xlsx(xlsx_path: str) -> tuple[DsdPackage, bytes, Report]:
     new_contents = splice.apply(contents, ops)
     if report.changed:
         parse_contents(new_contents)  # well-formedness 재검증
+    _remap_row_positions(doc, report)
     return package, new_contents, report

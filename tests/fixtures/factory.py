@@ -76,6 +76,17 @@ def pgbrk() -> str:
     return "<PGBRK/>"
 
 
+def group(inner: str, aclass: str = "COVER") -> str:
+    """TABLE-GROUP 래핑 (K-GAAP 표준 재무제표·표지류 — 구조 편집 금지 대상)."""
+    return f'<TABLE-GROUP ACLASS="{aclass}">' + CRLF + inner + CRLF + "</TABLE-GROUP>"
+
+
+def insertion(inner: str) -> str:
+    """INSERTION/LIBRARY 래핑 (라이브러리 삽입물 — 구조 편집 금지 대상)."""
+    return ("<INSERTION><LIBRARY>" + CRLF + inner + CRLF
+            + "</LIBRARY></INSERTION>")
+
+
 def statement_title_table(name_spaced: str) -> str:
     """재무제표 제목표: 첫 행 첫 셀 '재 무 상 태 표' — _statement_kw 판별용."""
     return table([], [[name_spaced]], ncols=1)

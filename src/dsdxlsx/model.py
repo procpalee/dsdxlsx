@@ -65,6 +65,10 @@ class Table:
     irregular: bool = False  # 그리드 전개 이상(열 초과 등) — 행 조작 금지
     grid: list | None = None  # grid.expand() 결과 캐시
     has_autosum: bool = False
+    # 구조 편집 가드 근거: TABLE-GROUP 래핑(K-GAAP 표준 재무제표·표지)과
+    # INSERTION/LIBRARY(라이브러리 삽입물) 내부 표는 신설·삭제 금지
+    group_aclass: str | None = None
+    in_insertion: bool = False
 
     @property
     def fixtable(self) -> bool:

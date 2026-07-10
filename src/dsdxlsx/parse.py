@@ -65,6 +65,8 @@ class _Builder:
         self.n_table = 0
         self.n_para = 0
         self.n_label = 0
+        self.group_stack: list[str] = []  # 열려 있는 TABLE-GROUP의 ACLASS
+        self.insertion_depth = 0  # INSERTION/LIBRARY 중첩
 
     def parse(self) -> Document:
         try:
@@ -110,7 +112,15 @@ class _Builder:
             if self.table is not None:
                 raise DsdParseError(f"중첩 TABLE은 지원하지 않음 (오프셋 {pos})")
             self.n_table += 1
-            self.table = Table(id=f"t{self.n_table:03d}", start=pos, end=-1, attrs=attrs)
+            self.table = Table(
+                id=f"t{self.n_table:03d}", start=pos, end=-1, attrs=attrs,
+                group_aclass=self.group_stack[-1] if self.group_stack else None,
+                in_insertion=self.insertion_depth > 0,
+            )
+        elif tag == "TABLE-GROUP":
+            self.group_stack.append(attrs.get("ACLASS", ""))
+        elif tag in ("INSERTION", "LIBRARY"):
+            self.insertion_depth += 1
         elif tag == "THEAD":
             self.in_thead = True
         elif tag == "COLGROUP":
@@ -184,6 +194,11 @@ class _Builder:
             self.in_thead = False
         elif tag == "COLGROUP":
             self.in_colgroup = False
+        elif tag == "TABLE-GROUP":
+            if self.group_stack:
+                self.group_stack.pop()
+        elif tag in ("INSERTION", "LIBRARY"):
+            self.insertion_depth = max(0, self.insertion_depth - 1)
         elif self.para is not None and tag == self.para.tag:
             para = self.para
             para.inner_end = pos
