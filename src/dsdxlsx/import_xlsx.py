@@ -25,7 +25,7 @@ from decimal import Decimal
 
 from openpyxl import load_workbook
 
-from . import blockops, compose, markers
+from . import blockops, compose, markers, renumber
 from . import grid as grid_mod
 from . import numbers, splice
 from .dsd_io import DsdPackage, read_dsd
@@ -57,6 +57,9 @@ class Report:
     table_deletes: list[str] = field(default_factory=list)
     para_inserts: list[str] = field(default_factory=list)
     para_deletes: list[str] = field(default_factory=list)
+    note_inserts: list[str] = field(default_factory=list)
+    note_deletes: list[str] = field(default_factory=list)
+    renumbered: list[str] = field(default_factory=list)  # 자동 재번호 치환 내역
     warnings: list[str] = field(default_factory=list)
     autosum_tables: set[str] = field(default_factory=set)
     # 표별 시트 행 위치 (시트 순서 = 재변환 후 문서의 TR 순서와 1:1) — check 주석용
@@ -68,7 +71,8 @@ class Report:
     @property
     def structural(self) -> bool:
         return bool(self.table_inserts or self.table_deletes
-                    or self.para_inserts or self.para_deletes)
+                    or self.para_inserts or self.para_deletes
+                    or self.note_inserts or self.note_deletes)
 
     @property
     def changed(self) -> bool:
@@ -143,14 +147,15 @@ def _texts_of(entry: SheetEntry) -> dict[int, str]:
     return out
 
 
-def _finalize_new_table(doc: Document, p: dict, inserts: list, report: Report,
-                        errors: list[str]):
+def _compose_pending_table(doc: Document, p: dict,
+                           errors: list[str]) -> tuple[bytes, list] | None:
+    """수집된 #새표 블록 → (표 바이트, 시트 행 목록). 실패 시 None."""
     rows = p["entries"]
     n_head = p["n_head"]
     if len(rows) <= n_head:
         errors.append(p["where"] + f"#새표: 헤더 {n_head}행 외에 본문 행이 없음 "
                                    f"(내용 {len(rows)}행)")
-        return
+        return None
     spec = compose.NewTableSpec(
         header_rows=[_texts_of(e) for e in rows[:n_head]],
         body_rows=[_texts_of(e) for e in rows[n_head:]],
@@ -166,41 +171,120 @@ def _finalize_new_table(doc: Document, p: dict, inserts: list, report: Report,
         block = compose.compose_table(doc.data, tpl, spec)
     except compose.ComposeError as e:
         errors.append(str(e))
-        return
-    inserts.append((p["anchor"], block, spec.sheet_rows))
-    report.table_inserts.append(
-        f"[{p['sheet']}!{p['marker_row']}행] 새 표 — 본문 {len(rows) - n_head}행, "
-        f"템플릿 {p['template'].id}")
+        return None
+    return block, spec.sheet_rows
 
 
 def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report,
                         errors: list[str]):
-    """마커(구조 편집)를 스트림에서 분리 — 반환: (일반 entry, 삽입 계획, 표/문단 삭제)."""
+    """마커(구조 편집)를 스트림에서 분리 — 반환: (일반 entry, 삽입 계획, 표/문단
+    삭제, 삭제 표 집합, 즉시 op 목록[주석 삽입/삭제/재번호])."""
     filtered: list[SheetEntry] = []
     inserts: list[tuple[object, bytes, list | None]] = []
     table_deletes: list[Table] = []
     para_deletes: list = []
     deleted_tables: set[str] = set()
+    extra_ops: list[splice.Op] = []
+    skip_ids: set[str] = set()          # 삭제된 주석 범위의 p/! 노드
+    note_infos_cache: list | None = None
+    new_note: dict | None = None        # {no,title,parts,sheet,marker_row}
+    note_deleted = False
 
     prev_block = None   # 같은 시트의 직전 블록(Table|Node) — 삽입 앵커
     last_table = None   # 같은 시트의 직전 표 — 기본 템플릿
     prev_sheet: str | None = None
+    seen_on_sheet = 0   # 이 시트에서 처리한 entry 수 (#새주석은 첫 행이어야)
     pending: dict | None = None  # 수집 중인 #새표 블록
+
+    def notes():
+        nonlocal note_infos_cache
+        if note_infos_cache is None:
+            note_infos_cache = renumber.note_infos(doc)
+        return note_infos_cache
 
     def finalize_pending():
         nonlocal pending
-        if pending is not None:
-            p, pending = pending, None
-            _finalize_new_table(doc, p, inserts, report, errors)
+        if pending is None:
+            return
+        p, pending = pending, None
+        made = _compose_pending_table(doc, p, errors)
+        if made is None:
+            return
+        block, sheet_rows = made
+        n_body = len(p["entries"]) - p["n_head"]
+        if p.get("into_note"):
+            new_note["parts"].append((block, sheet_rows))
+            report.table_inserts.append(
+                f"[{p['sheet']}!{p['marker_row']}행] 새 주석 내 표 — 본문 {n_body}행, "
+                f"템플릿 {p['template'].id}")
+        else:
+            inserts.append((p["anchor"], block, sheet_rows))
+            report.table_inserts.append(
+                f"[{p['sheet']}!{p['marker_row']}행] 새 표 — 본문 {n_body}행, "
+                f"템플릿 {p['template'].id}")
+
+    def finalize_new_note():
+        nonlocal new_note
+        if new_note is None:
+            return
+        note, new_note = new_note, None
+        infos = notes()
+        if not infos:
+            errors.append(note["where"] + "#새주석: 문서에서 주석 구획을 찾지 못함")
+            return
+        existing = sorted(i.no for i in infos)
+        no = note["no"]
+        if not (1 <= no <= existing[-1] + 1):
+            errors.append(note["where"] + f"#새주석 {no}: 번호가 불연속 "
+                          f"(현재 1~{existing[-1]}, 허용 최대 {existing[-1] + 1})")
+            return
+        payload = compose.compose_note(no, note["title"],
+                                       [b for b, _ in note["parts"]])
+        if no == existing[-1] + 1:  # 말미 append
+            anchor = infos[-1].blocks[-1].item
+            pos = anchor.end
+            extra_ops.append(splice.Op(pos=pos, start=pos, end=pos,
+                                       payload=blockops.PARA_SEP + payload))
+        else:  # 기존 번호 앞 삽입 (+ 필요 시 재번호 캐스케이드)
+            target = next(i for i in infos if i.no >= no)
+            pos = target.start
+            first = target.blocks[0]
+            sep = (blockops.TABLE_SEP if first.kind == "table" else blockops.PARA_SEP)
+            extra_ops.append(splice.Op(pos=pos, start=pos, end=pos,
+                                       payload=payload + sep))
+            if no in existing:
+                mapping = {k: k + 1 for k in existing if k >= no}
+                try:
+                    rn_ops, rn_rep = renumber.renumber_ops(doc, mapping)
+                except renumber.RenumberError as e:
+                    errors.append(note["where"] + f"#새주석 재번호 불가 — {e}")
+                    return
+                extra_ops.extend(rn_ops)
+                report.renumbered.extend(rn_rep.headings + rn_rep.ref_cells)
+                for m in rn_rep.mentions:
+                    report.warnings.append(f"재번호 확인 필요(서술 멘션): {m}")
+        for _, sheet_rows in note["parts"]:
+            if sheet_rows is not None:
+                report._inserted_tables.append(
+                    (pos, len(report._inserted_tables), sheet_rows))
+        report.note_inserts.append(
+            f"주석 {no} {note['title'][:16]} — 블록 {len(note['parts']) + 1}개"
+            + ("" if no == existing[-1] + 1 else f" (기존 {no}~ → +1 재번호)"))
 
     for entry in entries:
         if entry.sheet != prev_sheet:
             finalize_pending()
+            if new_note is not None and prev_sheet == new_note["sheet"]:
+                finalize_new_note()
             prev_block = None
             last_table = None
             prev_sheet = entry.sheet
+            seen_on_sheet = 0
         where = f"[{entry.sheet}!{entry.xlsx_row}행] "
         bval = entry.values.get(2)
+        in_note_sheet = new_note is not None and entry.sheet == new_note["sheet"]
+        first_on_sheet = seen_on_sheet == 0
+        seen_on_sheet += 1
         mk = None
         if markers.is_marker(bval):
             try:
@@ -228,7 +312,7 @@ def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report
                 if entry.row_id is not None:
                     errors.append(where + "#새표 행의 A열은 비워야 함")
                     continue
-                if prev_block is None:
+                if not in_note_sheet and prev_block is None:
                     errors.append(where + "#새표 위에 기준 블록(기존 행)이 없어 삽입 위치를 알 수 없음")
                     continue
                 if "원본" in mk.args:
@@ -236,6 +320,9 @@ def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report
                     if template is None:
                         errors.append(where + f"원본 표 없음: {mk.args['원본']}")
                         continue
+                elif in_note_sheet:
+                    errors.append(where + "#새주석 시트의 표는 원본=t### 템플릿 지정이 필요")
+                    continue
                 else:
                     template = last_table
                     if template is None:
@@ -252,12 +339,18 @@ def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report
                 pending = {"marker": mk, "anchor": prev_block, "template": template,
                            "n_head": n_head, "entries": [], "where": where,
                            "sheet": entry.sheet, "marker_row": entry.xlsx_row,
-                           "last_row": entry.xlsx_row}
+                           "last_row": entry.xlsx_row, "into_note": in_note_sheet}
                 continue
             if mk.kind == "표끝":
                 errors.append(where + "#표끝 앞에 #새표가 없음")
                 continue
             if mk.kind == "문단":
+                if in_note_sheet:
+                    new_note["parts"].append(
+                        (compose.compose_paragraph(mk.text), None))
+                    report.para_inserts.append(
+                        f"[{entry.sheet}!{entry.xlsx_row}행] 새 주석 내 문단")
+                    continue
                 if not blockops.is_note_sheet(entry.sheet):
                     errors.append(where + "#문단은 주석 시트에서만 지원")
                     continue
@@ -266,6 +359,47 @@ def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report
                     continue
                 inserts.append((prev_block, compose.compose_paragraph(mk.text), None))
                 report.para_inserts.append(f"[{entry.sheet}!{entry.xlsx_row}행] 새 문단")
+                continue
+            if mk.kind == "새주석":
+                if new_note is not None:
+                    errors.append(where + "#새주석은 한 번의 변환에 하나만 지원")
+                    continue
+                if note_deleted:
+                    errors.append(where + "#새주석과 #주석삭제는 같은 변환에서 함께 쓸 수 없음 "
+                                          "(삭제 → 변환 → 재export 후 추가)")
+                    continue
+                if not first_on_sheet or entry.row_id is not None:
+                    errors.append(where + "#새주석은 새(빈) 시트의 첫 행에 쓰세요")
+                    continue
+                new_note = {"no": int(mk.args["번호"]), "title": mk.text,
+                            "parts": [], "sheet": entry.sheet,
+                            "marker_row": entry.xlsx_row, "where": where}
+                continue
+            if mk.kind == "주석삭제":
+                if new_note is not None:
+                    errors.append(where + "#새주석과 #주석삭제는 같은 변환에서 함께 쓸 수 없음")
+                    continue
+                rid = entry.row_id or ""
+                node = doc.nodes.get(rid)
+                info = next((i for i in notes()
+                             if i.own_heading and i.heading.id == rid), None)
+                if node is None or info is None:
+                    errors.append(where + "#주석삭제는 주석 헤딩 문단 행(p###)의 B열에 쓰세요 "
+                                          "(혼합 문단 헤딩은 편집기에서 분리 후)")
+                    continue
+                reason = renumber.deletable(notes(), info)
+                if reason:
+                    errors.append(where + reason)
+                    continue
+                extra_ops.append(renumber.plan_note_delete(doc, info))
+                note_deleted = True
+                for block in info.blocks:
+                    if block.kind == "table":
+                        deleted_tables.add(block.item.id)
+                    else:
+                        skip_ids.add(block.item.id)
+                report.note_deletes.append(f"주석 {info.no} {info.title[:16]}")
+                _warn_dangling_refs(doc, info.no, report)
                 continue
             if mk.kind == "표삭제":
                 rid = entry.row_id or ""
@@ -297,6 +431,10 @@ def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report
             errors.append(where + f"#{mk.kind}은(는) 아직 지원하지 않음 — 주석 추가/삭제는 다음 단계")
             continue
 
+        if in_note_sheet:
+            errors.append(where + "#새주석 시트에는 #문단/#새표 마커 블록만 올 수 있음")
+            continue
+
         # 일반 행: '##' 이스케이프 해제 + 앵커/템플릿 추적
         if isinstance(bval, str) and bval.startswith("##"):
             entry.values[2] = bval[1:]
@@ -310,13 +448,45 @@ def _extract_structures(doc: Document, entries: list[SheetEntry], report: Report
                 prev_block = table
                 last_table = table
         elif rid and (rid.startswith("p") or rid.startswith("!")):
+            if rid in skip_ids:
+                continue  # 삭제된 주석 범위의 문단/라벨 행
             node = doc.nodes.get(rid)
             if node is not None:
                 prev_block = node
         filtered.append(entry)
 
     finalize_pending()
-    return filtered, inserts, table_deletes, para_deletes, deleted_tables
+    finalize_new_note()
+    return (filtered, inserts, table_deletes, para_deletes, deleted_tables,
+            extra_ops)
+
+
+def _warn_dangling_refs(doc: Document, no: int, report: Report):
+    """주석 삭제 후 남는 참조(FS 참조 열·서술 멘션) 경고."""
+    from .check import build_views, norm, use_profile
+
+    hits: list[str] = []
+    with use_profile(None):
+        _, ctx = build_views(doc)
+        for tv in ctx["statements"]:
+            note_col = next((c for c in range(tv.ncols)
+                             if "주석" in norm(tv.col_header(c))), None)
+            if note_col is None:
+                continue
+            for i in tv.body:
+                nums = [int(x) for x in re.findall(r"\d+", tv.text(i, note_col))]
+                if no in nums:
+                    hits.append(f"{tv.sec_title} '{tv.row_label(i).strip()[:16]}' 참조 열")
+    for node in doc.nodes.values():
+        for m in renumber.MENTION_RE.finditer(node.text):
+            if no in [int(x) for x in re.findall(r"\d+", m.group())]:
+                hits.append(f"{node.id} '{m.group()}'")
+    if hits:
+        report.warnings.append(
+            f"삭제된 주석 {no}을(를) 아직 참조하는 곳 {len(hits)}건 — "
+            + "; ".join(hits[:5])
+            + (" …" if len(hits) > 5 else "")
+            + " — 번호 정리는 `dsdxlsx renumber 파일.dsd --close-gap`")
 
 
 def build_edits(
@@ -329,9 +499,10 @@ def build_edits(
     errors: list[str] = []
 
     # 구조 편집(마커) 분리 — 남은 entries로 기존 셀/행 파이프라인 수행
-    entries, struct_inserts, table_deletes, para_deletes, deleted_tables = (
-        _extract_structures(doc, entries, report, errors))
+    (entries, struct_inserts, table_deletes, para_deletes, deleted_tables,
+     extra_ops) = _extract_structures(doc, entries, report, errors)
     report._deleted_tables = deleted_tables
+    ops.extend(extra_ops)
 
     seen_table_items: dict[str, list] = {}  # table_id -> [(row_id|None, entry)]
     seen_row_ids: set[str] = set()

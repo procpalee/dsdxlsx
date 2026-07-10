@@ -128,3 +128,13 @@ def compose_table(data: bytes, tpl: TableTemplate, spec: NewTableSpec) -> bytes:
 def compose_paragraph(text: str) -> bytes:
     """새 P — 유일한 비복제 합성 (P는 관례 변형이 없음, 전 샘플 실측)."""
     return b"<P>" + splice.escape_text(text) + b"</P>"
+
+
+def compose_note(no: int, title: str, parts: list[bytes]) -> bytes:
+    """새 주석 = 헤딩 P('N. 제목') + 블록들. 블록 사이 구분자는 관례
+    (<TABLE 앞만 빈 줄) — export의 _split_notes가 안전하게 인식하는 분리 헤딩."""
+    out = compose_paragraph(f"{no}. {title}".strip())
+    for block in parts:
+        sep = b"\r\n\r\n" if block.lstrip()[:6] == b"<TABLE" else b"\r\n"
+        out += sep + block
+    return out

@@ -49,7 +49,10 @@ def cmd_import(args) -> int:
         for label, items in (("표 신설", report.table_inserts),
                              ("표 삭제", report.table_deletes),
                              ("문단 신설", report.para_inserts),
-                             ("문단 삭제", report.para_deletes)):
+                             ("문단 삭제", report.para_deletes),
+                             ("주석 신설", report.note_inserts),
+                             ("주석 삭제", report.note_deletes),
+                             ("재번호 자동 치환", report.renumbered)):
             if items:
                 print(f"  {label} {len(items)}건:")
                 for line in items:
@@ -233,6 +236,66 @@ def cmd_annotate_ai(args) -> int:
     return 0
 
 
+def cmd_renumber(args) -> int:
+    """주석 재번호 — 헤딩·FS 참조 열은 자동, 서술 멘션은 확인필요 목록.
+    재번호 전후 C4 대사 결과 동형성 게이트를 통과해야 파일을 만든다."""
+    from . import renumber as rn
+    from . import splice
+    from .profile import resolve_profile
+
+    package = read_dsd(args.dsd)
+    doc = parse_contents(package.contents)
+    try:
+        meta = package.meta
+    except FileNotFoundError:
+        meta = None
+    profile = resolve_profile(meta, args.profile)
+
+    nums = sorted(i.no for i in rn.note_infos(doc))
+    if args.map:
+        mapping = {}
+        for pair in args.map.split(","):
+            a, _, b = pair.partition(":")
+            mapping[int(a.strip())] = int(b.strip())
+    elif args.close_gap:
+        mapping = rn.build_close_gap_mapping(nums)
+    else:
+        print("--map \"15:16,16:17\" 또는 --close-gap 중 하나를 지정하세요.",
+              file=sys.stderr)
+        return 2
+    print(f"주석 현황: {nums}")
+    if not mapping:
+        print("변경 없음 — 매핑이 비어 있습니다 (번호 공백 없음).")
+        return 0
+    print(f"재번호 매핑: {dict(sorted(mapping.items()))}")
+
+    sig_before = rn.c4_signature(doc, profile)
+    ops, rep = rn.renumber_ops(doc, mapping, profile)  # RenumberError → main에서 출력
+    new_contents = splice.apply(package.contents, ops)
+    doc2 = parse_contents(new_contents)
+    if rn.c4_signature(doc2, profile) != sig_before:
+        print("오류: 재번호 후 재무제표↔주석 대사(C4) 결과가 달라짐 — "
+              "동형성 게이트 실패, 파일을 만들지 않습니다.", file=sys.stderr)
+        return 1
+    if rep.mentions:
+        print(f"\n확인 필요 — 서술문 멘션 {len(rep.mentions)}건 (자동 치환하지 않음):")
+        for m in rep.mentions:
+            print(f"  - {m}")
+        if args.strict:
+            print("--strict: 미확인 멘션이 있어 중단합니다.", file=sys.stderr)
+            return 1
+    out = args.out or os.path.splitext(args.dsd)[0] + "_재번호.dsd"
+    write_dsd(out, package, new_contents)
+    print(f"\n재번호 완료: {out}")
+    print(f"  헤딩 치환 {len(rep.headings)}건: " + "; ".join(rep.headings[:6]))
+    if rep.ref_cells:
+        print(f"  재무제표 참조 열 치환 {len(rep.ref_cells)}건:")
+        for line in rep.ref_cells[:8]:
+            print(f"    - {line}")
+    print("  C4 동형성 게이트 통과 ✓ — 최종 확인은 DART 편집기에서.")
+    return 0
+
+
 def cmd_calibrate(args) -> int:
     """새 회사 온보딩: 전기 심리완료 DSD가 전수 통과하는지 확인하고,
     잔여 지적은 suppress 규칙 초안(주석 처리)으로 스캐폴딩한다.
@@ -383,6 +446,20 @@ def main(argv=None) -> int:
     )
     p.add_argument("xlsx")
     p.set_defaults(func=cmd_recheck)
+
+    p = sub.add_parser(
+        "renumber",
+        help="주석 재번호 (헤딩·FS 참조 열 자동, 서술 멘션은 확인필요 목록, C4 동형성 게이트)",
+    )
+    p.add_argument("dsd")
+    p.add_argument("--map", help='명시 매핑: "15:16,16:17"')
+    p.add_argument("--close-gap", action="store_true",
+                   help="번호 공백 자동 밀착 (1,2,3,5 → 5를 4로)")
+    p.add_argument("--strict", action="store_true",
+                   help="서술문 멘션(수동 확인 항목)이 있으면 중단")
+    p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
+    p.add_argument("-o", "--out", help="출력 DSD 경로 (기본: <이름>_재번호.dsd)")
+    p.set_defaults(func=cmd_renumber)
 
     p = sub.add_parser(
         "calibrate",
