@@ -1,7 +1,9 @@
 """DSD 숫자 표기 판별·변환.
 
-문서 관례 (샘플 실측): 콤마 3자리 그룹, 음수는 괄호 "(232,116,145)",
-플레이스홀더 "-", 주석 참조 "6,28,31"은 숫자가 아님(3자리 그룹 불일치로 배제).
+문서 관례 (샘플 실측): 콤마 3자리 그룹, 음수는 괄호 "(232,116,145)" 또는
+부호 기호 "△1,234"/"▲1,234"(일부 회사), 플레이스홀더 "-",
+주석 참조 "6,28,31"은 숫자가 아님(3자리 그룹 불일치로 배제).
+쓰기(to_dsd_text)는 괄호 관례로 통일한다.
 """
 from __future__ import annotations
 
@@ -40,6 +42,9 @@ def classify(text: str) -> int | Decimal | None:
         return None
     negative = s.startswith("(") and s.endswith(")")
     core = s[1:-1].strip() if negative else s
+    if not negative and core[:1] in ("△", "▲"):
+        negative = True
+        core = core[1:].strip()
     if _INT_RE.match(core):
         value = int(core.replace(",", ""))
         if value >= _MAX_SAFE:
@@ -51,8 +56,11 @@ def classify(text: str) -> int | Decimal | None:
     return None
 
 
-def to_dsd_text(value: int | float | Decimal) -> str:
-    """숫자 → 문서 관례 표기 (콤마, 음수는 괄호)."""
+def to_dsd_text(value: int | float | Decimal, like: str = "") -> str:
+    """숫자 → 문서 관례 표기 (콤마, 음수는 괄호).
+
+    like에 원본 셀 텍스트를 주면 그 셀의 음수 관례(△/▲)를 따라 쓴다 —
+    표기 혼용(괄호·기호 섞임)이 편집기 화면에 드러나는 것 방지."""
     if isinstance(value, float):
         value = Decimal(str(value))
     if isinstance(value, Decimal) and value == value.to_integral_value():
@@ -63,7 +71,12 @@ def to_dsd_text(value: int | float | Decimal) -> str:
         text = f"{magnitude:,f}"
     else:
         text = f"{magnitude:,}"
-    return f"({text})" if negative else text
+    if not negative:
+        return text
+    sym = like.strip()[:1]
+    if sym in ("△", "▲"):
+        return f"{sym}{text}"
+    return f"({text})"
 
 
 def values_equal(xlsx_value, node_text: str) -> bool:

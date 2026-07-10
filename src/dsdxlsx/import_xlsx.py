@@ -56,7 +56,7 @@ class Report:
         return bool(self.cell_edits or self.row_inserts or self.row_deletes)
 
 
-def _cell_value_to_text(value) -> str:
+def _cell_value_to_text(value, like: str = "") -> str:
     if value is None:
         return ""
     if isinstance(value, bool):
@@ -64,7 +64,7 @@ def _cell_value_to_text(value) -> str:
     if isinstance(value, (int, float, Decimal)):
         if value == 0:
             return "-"  # 문서 관행: 0은 '-' 표기
-        return numbers.to_dsd_text(value)
+        return numbers.to_dsd_text(value, like=like)
     return str(value)
 
 
@@ -244,7 +244,7 @@ def _process_table(doc, table: Table, items, ops, report, errors):
                 continue
             if cell.complex:
                 report.warnings.append(f"{where}: 셀에 서식/중첩 문단이 있어 평문으로 대체됨")
-            new_text = _cell_value_to_text(value)
+            new_text = _cell_value_to_text(value, like=cell.text)
             # 원본이 접미 단위('2,978,480주')였고 새 값이 숫자면 단위 유지
             suffix = numbers.suffix_of(cell.text)
             if suffix and isinstance(value, (int, float, Decimal)) and new_text != "-":

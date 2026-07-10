@@ -29,13 +29,15 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 
 from openpyxl.utils import coordinate_to_tuple, get_column_letter
 
 _VERIFY_MARK = ",TRUE,"   # 검산 수식(=IF(...,TRUE,...)) 식별 마커
 _TOL = 1                  # |차이| ≤ 1 은 통과 (원단위 절사 — check.py 와 동일)
-_ROW_ID_RE = re.compile(r"^(t\d{3}\.r\d{3}|![sv]\d+)$")  # A열 ID(라벨 아님)
+_ROW_ID_RE = re.compile(r"^(t\d{3}\.r\d{3}|![svt]\d+)$")  # A열 ID(라벨 아님)
+_TIE_SHEET = "대사맵"     # ties 시트 — 라벨을 대사쌍 표기로 구성
 
 
 # ── OfficeCLI 호출 ────────────────────────────────────────────────────
@@ -100,6 +102,15 @@ def _row_label(ws, row: int) -> str:
     return ""
 
 
+def _tie_label(ws, row: int) -> str:
+    """대사맵 시트: '대사A ↔ 대사B (기간)' 형식 라벨."""
+    a = ws.cell(row=row, column=4).value or ""
+    b = ws.cell(row=row, column=7).value or ""
+    k = ws.cell(row=row, column=9).value or ""
+    label = f"{a} ↔ {b}".strip(" ↔")
+    return (f"{label} ({k})" if k else label)[:60]
+
+
 def find_checks(xlsx_path: str) -> list[VCheck]:
     """편집용 xlsx 에서 검산 수식 셀(=IF(...,TRUE,...))의 위치·라벨 수집."""
     from openpyxl import load_workbook
@@ -107,12 +118,13 @@ def find_checks(xlsx_path: str) -> list[VCheck]:
     checks: list[VCheck] = []
     try:
         for ws in wb.worksheets:
+            labeler = _tie_label if ws.title == _TIE_SHEET else _row_label
             for row in ws.iter_rows():
                 for cell in row:
                     v = cell.value
                     if isinstance(v, str) and v.startswith("=") and _VERIFY_MARK in v:
                         checks.append(VCheck(ws.title, cell.coordinate,
-                                             _row_label(ws, cell.row)))
+                                             labeler(ws, cell.row)))
     finally:
         wb.close()
     return checks
@@ -182,23 +194,37 @@ class AnnotVerifyReport:
 
 
 def verify_annotated(xlsx_path: str) -> AnnotVerifyReport:
-    """annotate 된 xlsx 의 검산 수식을 OfficeCLI 로 평가해 PASS/FAIL 판정."""
+    """annotate 된 xlsx 의 검산 수식을 OfficeCLI 로 평가해 PASS/FAIL 판정.
+
+    ⚠ OfficeCLI 는 워크북을 **경로 기준으로 캐시**해 파일이 바뀌어도 이전
+    평가값을 돌려준다(실측 — 수정 후 재평가가 통과로 둔갑하는 치명 함정).
+    매 실행 고유한 임시 사본을 만들어 평가해 캐시를 원천 우회한다. 원본 불변."""
     checks = find_checks(xlsx_path)
     report = AnnotVerifyReport()
-    # 시트별로 묶어 bounding box 를 한 번에 평가 (프로세스 최소화)
-    by_sheet: dict[str, list[VCheck]] = {}
-    for c in checks:
-        by_sheet.setdefault(c.sheet, []).append(c)
-    for sheet, items in by_sheet.items():
-        rows = [coordinate_to_tuple(c.coord)[0] for c in items]
-        cols = [coordinate_to_tuple(c.coord)[1] for c in items]
-        rng = (f"{get_column_letter(min(cols))}{min(rows)}:"
-               f"{get_column_letter(max(cols))}{max(rows)}")
-        vals = _eval_range(xlsx_path, sheet, rng)
-        for c in items:
-            status, diff = _classify(vals.get(c.coord, ""))
-            report.results.append(
-                VResult(c.sheet, c.coord, c.label, vals.get(c.coord, ""), status, diff))
+    fd, tmp = tempfile.mkstemp(suffix=".xlsx", prefix="dsdxlsx_recheck_")
+    os.close(fd)
+    try:
+        shutil.copyfile(xlsx_path, tmp)
+        # 시트별로 묶어 bounding box 를 한 번에 평가 (프로세스 최소화)
+        by_sheet: dict[str, list[VCheck]] = {}
+        for c in checks:
+            by_sheet.setdefault(c.sheet, []).append(c)
+        for sheet, items in by_sheet.items():
+            rows = [coordinate_to_tuple(c.coord)[0] for c in items]
+            cols = [coordinate_to_tuple(c.coord)[1] for c in items]
+            rng = (f"{get_column_letter(min(cols))}{min(rows)}:"
+                   f"{get_column_letter(max(cols))}{max(rows)}")
+            vals = _eval_range(tmp, sheet, rng)
+            for c in items:
+                status, diff = _classify(vals.get(c.coord, ""))
+                report.results.append(
+                    VResult(c.sheet, c.coord, c.label, vals.get(c.coord, ""),
+                            status, diff))
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
     return report
 
 

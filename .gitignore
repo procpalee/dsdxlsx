@@ -6,6 +6,9 @@ meta.xml
 samples/
 sample/
 
+# 회사별 프로파일·대사맵 — 고객사명 포함, 커밋 금지 (기본값은 src/dsdxlsx/data/)
+profiles/
+
 # Python
 __pycache__/
 *.pyc

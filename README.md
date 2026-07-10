@@ -34,9 +34,32 @@ uv run --no-editable dsdxlsx verify 원본.dsd 수정본.dsd
 # 5) 정합성 검증 (수정 후 필수 — DART 편집기는 본문 합계를 자동 재계산하지 않음)
 uv run --no-editable dsdxlsx check 편집한파일.xlsx      # 저장한 편집 상태 그대로 검사
 uv run --no-editable dsdxlsx check 수정본.dsd --only C1,C4
+uv run --no-editable dsdxlsx check 파일.xlsx --profile 회사명   # 회사 프로파일 지정
+#    (기본: meta.xml의 회사명으로 profiles/<회사명>/profile.toml 자동 탐색 — 없으면 기본 규칙)
+
+# 5-0) 새 회사 온보딩 — 전기 심리완료 DSD로 캘리브레이션
+uv run --no-editable dsdxlsx calibrate 전기심리완료.dsd [--write]
+#    전수 통과 → 골든 샘플 등록 권장 (종료코드 0). 잔여 warn → 실제 이상인지 검토 후,
+#    승인된 예외면 suppress 초안(--write 시 profile.toml에 주석으로 추가)을 해제해 활성화.
+
+# 5-1) 대사맵 — 명시적 대사쌍 확정 워크플로 (C8)
+#    check가 '대사맵' 시트에 대사쌍 제안(FS↔주석·주석↔주석 금액 일치)을 채워준다.
+#    상태 열을 '확정'으로 바꾼 뒤:
+uv run --no-editable dsdxlsx ties save 편집한파일.xlsx  # → profiles/<회사>/ties.json 저장
+#    이후 매 check마다 확정 쌍을 엄격 검증(불일치=warn·빨강) — 기수가 바뀌어도
+#    selector(구획·행 라벨 기반)라 그대로 살아남는다. '제외'한 쌍은 다시 제안되지 않음.
 
 # 6) 헤드리스 재검증 (Excel 없이 검산 수식 평가 — 무인 파이프라인·CI·에이전트용)
 uv run --no-editable dsdxlsx recheck 편집한파일.xlsx    # check가 심은 =IF(...,TRUE,...) 수식 평가
+
+# 7) AI 검토 (룰베이스가 못 하는 판단형 검토 — Claude Code 스킬 /dsd-review)
+uv run --no-editable dsdxlsx check 파일.xlsx --json review.json   # ① 리뷰용 구조화 JSON
+#    → 스킬(AI)이 review.json으로 오타·띄어쓰기 / 주기(주석 참조) 적절성 / 페이지 분할 /
+#      대사 제안 정제를 검토해 findings.json 작성 →
+uv run --no-editable dsdxlsx annotate-ai 파일.xlsx findings.json  # ② 'AI검토' 시트 기록
+#    Claude Code에서 "/dsd-review 파일.xlsx"라고 하면 ①~② 전 과정을 스킬이 수행.
+#    모든 AI 소견은 참고용(advisory) — 반영은 본문 셀 수정 후 check 재실행으로 검산.
+#    스킬 원본: skills/dsd-review/ (배포본: ~/.claude/skills/dsd-review/)
 ```
 
 xlsx를 check하면 검증 결과가 **그 파일 안에 살아있는 엑셀 수식으로** 기록된다
@@ -72,20 +95,33 @@ uv run --no-editable dsdxlsx recheck 편집한파일.xlsx
 
 - 사전조건: OfficeCLI 바이너리 (`npm i -g @officecli/officecli`). 미설치 시 안내 후 종료코드 2.
 - 구현: `verify_annotated.py` — officecli만 직접 호출(외부 라이브러리 미의존). 원본 xlsx 불변(읽기만).
+- ⚠ **OfficeCLI는 워크북을 경로 기준으로 캐시**해 파일이 바뀌어도 이전 평가값을 돌려준다
+  (실측 — 수정 후 재검증이 통과로 둔갑하는 함정). recheck는 매 실행 **고유 임시 사본**을
+  만들어 평가해 이를 우회한다. officecli를 직접 쓸 때는 이 함정을 주의할 것.
 - 주의: C4 대사는 크로스시트 COUNTIF 수식을 쓴다. 실측상 OfficeCLI가 정상 평가하지만,
-  '미확인'이 나오면 Excel로 재확인을 권한다.
+  '미확인'이 나오면 Excel로 재확인을 권한다. 대사맵(C8) 확정 수식도 recheck 게이트에
+  자동 포함된다 — 확정 쌍이 해석 불가면 '해석불가'로 게이트가 실패한다.
 
 ### check 검사 항목 (전부 규칙 기반)
 
 | 검사 | 내용 |
 |---|---|
 | C1 | 자동합계(AUTOSUM COLALL/COLPART/ROWALL/ROWPART) 셀 재계산 검산 |
-| C2 | 들여쓰기 계층 그룹 footing (Ⅰ.유동자산 = 하위 계정 합) — 손익계산서류 제외 |
+| C2 | 그룹 footing — 들여쓰기 계층 / 로마자 접두 / **무들여쓰기 총계-먼저**(흥구형: 합 관계로 트리 재귀 분해, 깨진 열은 기준열 구조 적용) — 손익계산서류 제외 |
 | C3 | 합계/소계/…총계 행 footing (수기 소계 포함, 다중 후보 검산) |
 | C7 | 재무제표 계산 라인 — 손익계산서(매출총이익·영업이익·차감전순이익·순이익·총포괄손익, 부호 규칙) + 라벨 합산식 "(Ⅰ+Ⅱ+Ⅲ+Ⅳ)" 행(현금흐름표) |
 | C4 | 재무제표↔주석 대사 — FS 주석참조 열의 금액이 해당 주석에 존재하는지 (조합 탐색 포함) |
 | C5 | 주석↔주석 대사 — 같은 (계정, 기간)이 주석 간 다른 금액이면 후보 플래그 |
+| C8 | 대사맵 — 사람이 확정한 대사쌍(ties.json)의 엄격 검증. 발견(C4·C5)은 제안만 만들고, 확정 쌍의 불일치·해석 불가만 warn |
 | C6 | 표기 검출 — 깨진 숫자·여분 공백·괄호 짝·단위 혼용 |
+
+검사 규칙(키워드·정규식·허용오차)은 코드가 아니라 **프로파일**이다:
+기본값 `src/dsdxlsx/data/_default.toml`, 회사별 편차는 `profiles/<회사명>/profile.toml`
+(부분 override + 승인된 예외 suppress 목록). **profiles/ 는 고객사명 포함 — 커밋 금지**(.gitignore).
+음수는 괄호 `(1,234)` 외에 `△1,234`/`▲1,234` 표기도 인식하며, 수정 시 원본 셀의
+관례를 따라 재기입한다. 기간 열은 당기/전기 키워드 외에 `제 26 기`류 기수 비교로도 판별.
+check 말미의 **커버리지** 줄과 검증요약 하단 목록이 "검산이 하나도 적용되지 않은 표"를
+표면화한다 — 침묵 통과 방지.
 
 핵심 검산 규칙(실측): 합계는 위쪽의 소계(마크 유무 무관)를 더하고 소계가 커버하는
 구간은 건너뛴다. 심리 완료 원본은 C1(194건)·C2·C3 전수 통과가 테스트로 고정되어 있다.
@@ -118,9 +154,15 @@ AUTOSUM(자동합계) 셀이 있는 표를 수정하면 경고가 출력된다 �
 ## 개발
 
 ```powershell
-uv run --no-editable pytest tests   # 샘플 .dsd가 폴더에 있어야 E2E 실행 (없으면 skip)
+uv run --no-editable python -m pytest tests  # 샘플 .dsd가 sample/에 있어야 E2E (없으면 skip)
+#  (`uv run pytest`는 한글 경로에서 trampoline 오류 — python -m 으로 실행)
 # 소스 수정 후에는 재설치 필요:
 uv sync --no-editable --reinstall-package dsdxlsx
+# 재설치 없이 작업 트리로 바로 테스트하려면:
+#   PYTHONPATH=src uv run --no-editable python -m pytest tests  (bash 기준)
 ```
+
+CI/신규 클론용 합성 픽스처: `tests/fixtures/factory.py` — 실측 관례를 흉내 낸 가짜
+회사 미니 DSD를 코드로 조립한다(고객 데이터 불필요). 프로파일·대사맵 테스트가 사용.
 
 ⚠ 샘플 DSD·xlsx는 고객 실데이터 — `.gitignore`로 제외됨. 커밋 금지.

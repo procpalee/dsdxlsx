@@ -17,16 +17,30 @@ C6 표기 검출: 깨진 숫자·공백 낀 숫자·괄호 짝·단위 혼용
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from . import grid as grid_mod
 from .export_xlsx import STATEMENT_KEYWORDS, refined_sections
 from .model import Document, Table
+from .profile import Profile, default_profile
 
-TOTAL_RE = re.compile(r"^(합\s*계|소\s*계|총\s*계|계)$")
-GRAND_TOTAL_RE = re.compile(r"총\s*계$")
-UNIT_RE = re.compile(r"\(단위\s*:\s*([^)]+)\)")
+# 활성 프로파일 — 키워드·정규식·허용오차의 단일 소스 (기본값 = data/_default.toml).
+# run_checks(profile=)가 검사 동안 교체한다. CLI 단일 스레드 전제.
+_P: Profile = default_profile()
+
+
+@contextmanager
+def use_profile(profile: Profile | None):
+    """TableView·검사 헬퍼가 읽는 활성 프로파일을 잠시 교체 (ties 등 외부 모듈용)."""
+    global _P
+    prev = _P
+    _P = profile or default_profile()
+    try:
+        yield _P
+    finally:
+        _P = prev
 
 
 @dataclass
@@ -63,6 +77,11 @@ class CheckReport:
     findings: list[Finding] = field(default_factory=list)
     results: list[Result] = field(default_factory=list)
     counts: dict = field(default_factory=dict)  # check -> 검사 수
+    # 프로파일 suppress 규칙으로 억제된 발견 사항 [(Finding, 사유)] — 숨기지 않고 집계
+    suppressed: list[tuple[Finding, str]] = field(default_factory=list)
+    profile_name: str = "_default"
+    # 표별 검사 커버리지 [{table, context, checks, skipped}] — 침묵 통과 방지
+    coverage: list[dict] = field(default_factory=list)
 
     def add(self, check: str, level: str, where: str, message: str):
         self.findings.append(Finding(check, level, where, message))
@@ -116,11 +135,7 @@ def fmt(value) -> str:
 
 def is_total_label(label: str) -> bool:
     n = norm(label)
-    return bool(TOTAL_RE.match(n) or GRAND_TOTAL_RE.search(n))
-
-
-# 표별 단위 표기 → 원화 환산 배수 (일부 IFRS 회사: 주석이 천원 단위)
-_UNIT_MULT = {"원": 1, "천원": 1_000, "백만원": 1_000_000, "십억원": 1_000_000_000}
+    return bool(_P.total_re.match(n) or _P.grand_total_re.search(n))
 
 
 class TableView:
@@ -160,7 +175,8 @@ class TableView:
         모든 텍스트 셀을 본다."""
         for c in range(self.ncols):
             t = norm(self.text(i, c))
-            if t and self.value(i, c) is None and (TOTAL_RE.match(t) or GRAND_TOTAL_RE.search(t)):
+            if t and self.value(i, c) is None and (_P.total_re.match(t)
+                                                   or _P.grand_total_re.search(t)):
                 return True
         return False
 
@@ -171,9 +187,9 @@ class TableView:
             self._unit = 1
             for i in self.head:
                 for c in range(self.ncols):
-                    m = UNIT_RE.search(self.text(i, c))
+                    m = _P.unit_re.search(self.text(i, c))
                     if m:
-                        u = _UNIT_MULT.get(norm(m.group(1)).split(",")[-1])
+                        u = _P.unit_mult.get(norm(m.group(1)).split(",")[-1])
                         if u:
                             self._unit = u
                         break
@@ -205,12 +221,29 @@ class TableView:
                     parts.append(t)
         return "/".join(parts)
 
+    def _gisu_ranks(self) -> dict[int, str]:
+        """표 헤더의 기수 집합 → {기수: 버킷}. 최대 기수=당기, 둘째=전기.
+        ('제 26 기 1분기말 / 제 25 기말'처럼 (당)/(전) 표기가 없는 회사 대응)"""
+        if not hasattr(self, "_gisu"):
+            nums = set()
+            for c in range(self.ncols):
+                m = re.search(r"제(\d+)기", norm(self.col_header(c)))
+                if m:
+                    nums.add(int(m.group(1)))
+            ranked = sorted(nums, reverse=True)
+            self._gisu = ({ranked[0]: "당기", ranked[1]: "전기"}
+                          if len(ranked) >= 2 else {})
+        return self._gisu
+
     def period_bucket(self, c: int) -> str | None:
         h = norm(self.col_header(c))
-        if "당분기" in h or "당기" in h or "(당)" in h:
+        if any(k in h for k in _P.period_current):
             return "당기"
-        if "전분기" in h or "전기" in h or "(전)" in h:
+        if any(k in h for k in _P.period_prior):
             return "전기"
+        m = re.search(r"제(\d+)기", h)
+        if m:
+            return self._gisu_ranks().get(int(m.group(1)))
         return None
 
     def where(self, i: int, c: int | None = None) -> str:
@@ -250,12 +283,10 @@ def _is_col_autosum(node) -> bool:
 
 
 # 흐름표의 결과 행('기말금액' 등)은 소계 역할 — 차감후 금액 = 기말금액 + 차감항목
-_FLOW_END_RE = re.compile(r"^(당기말|전기말|기말)")
-
 
 def _row_is_subtotal(tv: TableView, j: int, c: int) -> bool:
     return (_is_col_autosum(tv.cell(j, c)) or tv.row_is_total(j)
-            or bool(_FLOW_END_RE.match(norm(tv.row_label(j)))))
+            or bool(_P.flow_end_re.match(norm(tv.row_label(j)))))
 
 
 def _smart_col_terms(tv: TableView, i: int, c: int) -> list:
@@ -422,22 +453,20 @@ def _row_candidates(tv: TableView, i: int, c: int) -> list:
 
 def _pick(cands: list, stated):
     """일치 후보 우선, 없으면 최근접 후보. 반환: (계산값, 항 목록, 일치 여부).
-    단수차 ±1은 일치로 인정 (천원 단위 문서의 원단위 절사 관행)."""
+    단수차(기본 ±1)는 일치로 인정 (천원 단위 문서의 원단위 절사 관행)."""
     for total, terms in cands:
         if total == stated:
             return total, terms, True
     total, terms = min(cands, key=lambda x: abs(x[0] - stated))
-    if abs(total - stated) <= 1:
+    if abs(total - stated) <= _P.footing_tol:
         return total, terms, True
     return total, terms, False
 
 
 # 재무 검산 대상이 아닌 구획 (감사시간 표의 합계는 단순합이 아님, 표지 목차 페이지 등)
-_SKIP_SECTION_RE = re.compile(r"(표지|외부감사|내부회계|감사보고서|검토보고서)")
-
 
 def _skip_section(tv: TableView) -> bool:
-    return bool(_SKIP_SECTION_RE.search(norm(tv.sec_title)))
+    return bool(_P.skip_section_re.search(norm(tv.sec_title)))
 
 
 # ── C1: AUTOSUM 검산 ─────────────────────────────────────────────────
@@ -507,6 +536,168 @@ def _roman_group_footing(tv: TableView, report: CheckReport):
                 )
 
 
+# ── C2b: 무들여쓰기 총계-먼저(flat totals-first) footing ──────────────
+# 흥구형 IFRS 재무상태표: 들여쓰기·로마자 없이 '유동자산(합계) → 구성항목'
+# 순서로 평평하게 나열. 계층이 라벨에 없으므로 **정확한 합 관계 자체**로 트리를
+# 재귀 분해한다(12자리 금액의 우연 일치는 사실상 없음 — C1 다중 후보와 동일 논거).
+#
+# 핵심: 구조 추론과 검증을 분리한다. 편집으로 합이 깨진 열은 분해가 실패하므로,
+# 합이 맞는 다른 열(예: 전기)에서 확정한 구조를 그 열에 적용해 차이를 보고한다.
+# 어떤 열도 분해되지 않으면 침묵하지 않고 info로 표면화.
+
+_PARSE_BUDGET = 500_000
+
+
+def _parse_trees(vals: list, i: int, hi: int, target, budget: list, dead: set):
+    """vals[i:] 접두를 target으로 합산하는 모든 블록열 분해를 yield: (j, nodes).
+    블록 = 잎(행 하나) 또는 부모(행 + 뒤따르는 자식 블록들이 그 값으로 합산).
+    첫 해가 부분 소비일 수 있으므로 단일 결과가 아니라 열거한다 — 세그먼트
+    파서(호출부)는 전량 소비(j == hi) 해만 채택.
+
+    dead = 해가 하나도 없음이 확정된 (위치, 잔여목표) 상태 — 음수 행 때문에
+    합 범위로 가지치기할 수 없으므로 이 메모가 지수 폭주를 막는 핵심.
+    budget은 최후 방어선(소진 시 분해 실패 → info 표면화)."""
+    if budget[0] <= 0 or (i, target) in dead:
+        return
+    budget[0] -= 1
+    produced = False
+    if target == 0:
+        produced = True
+        yield (i, [])  # 목표 달성 후보 — 0값 행 흡수는 아래 잎 탐색이 계속
+    if i < hi:
+        _, v = vals[i]
+        for j, nodes in _parse_trees(vals, i + 1, hi, target - v, budget, dead):
+            produced = True
+            yield (j, [(i, [])] + nodes)
+        if v != 0:  # 부모: 자식 블록들이 정확히 v로 합산
+            for k, children in _parse_trees(vals, i + 1, hi, v, budget, dead):
+                if not children:
+                    continue
+                for j, nodes in _parse_trees(vals, k, hi, target - v, budget, dead):
+                    produced = True
+                    yield (j, [(i, children)] + nodes)
+    if not produced and budget[0] > 0:
+        dead.add((i, target))  # 완전 탐색 후 무해 확정 (예산 소진 시엔 미확정)
+
+
+def _collect_parents(seg: list, nodes: list, checks: list):
+    for k, children in nodes:
+        if children:
+            checks.append((seg[k][0], [seg[c][0] for c, _ in children], "그룹"))
+            _collect_parents(seg, children, checks)
+
+
+def _parse_flat_segment(tv: TableView, c: int, g: int, rows: list[int],
+                        prev_totals: list):
+    """한 열의 한 세그먼트([직전 총계..총계 g)) 분해.
+    반환: [(대상 행, [구성 행], 종류)] | [](총계값 없음) | None(분해 실패)."""
+    gval = tv.value(g, c)
+    if gval is None:
+        return []
+    seg = [(i, tv.value(i, c)) for i in rows if tv.value(i, c) is not None]
+    if seg:
+        budget = [_PARSE_BUDGET]
+        gen = _parse_trees(seg, 0, len(seg), gval, budget, set())
+        nodes = next((ns for j, ns in gen if j == len(seg)), None)
+        if nodes is None:
+            return None
+        checks = [(g, [seg[k][0] for k, _ in nodes], "총계")]
+        _collect_parents(seg, nodes, checks)
+        return checks
+    # 빈 세그먼트(자본과부채총계류): 직전 총계 행들의 접두 합
+    for k in range(1, len(prev_totals) + 1):
+        cand = prev_totals[-k:]
+        if sum(v for _, v in cand) == gval:
+            return [(g, [r for r, _ in cand], "총계 결합")]
+    return None
+
+
+def _shape_suspect(tv: TableView, c: int, ref_col: int, term_rows: list[int]) -> bool:
+    """기준열 구조 전이의 이형 신호: 기준열에서 0(또는 없음)이던 항이 이 열에서는
+    값이 있고, 그 값이 바로 뒤따르는 형제 항들의 합과 정확히 같으면 — 이 열에서는
+    그 항이 부모(뒤 항들이 자식)일 가능성이 높다 → 단정하지 않는다."""
+    vals = [tv.value(j, c) for j in term_rows]
+    for a, j in enumerate(term_rows):
+        rv = tv.value(j, ref_col)
+        cv = vals[a]
+        if rv in (0, None) and cv not in (0, None):
+            acc = 0
+            for b in range(a + 1, len(term_rows)):
+                if vals[b] is None:
+                    break
+                acc += vals[b]
+                if acc == cv:
+                    return True
+    return False
+
+
+def _flat_forward_footing(tv: TableView, report: CheckReport):
+    grands = [i for i in tv.body
+              if _P.grand_total_re.search(norm(tv.row_label(i)))
+              and any(tv.value(i, c) is not None for c in range(tv.ncols))]
+    if not grands:
+        return
+    cols = [c for c in range(tv.ncols)
+            if sum(1 for i in tv.body if tv.value(i, c) is not None) >= 6]
+    if not cols:
+        return
+    # 세그먼트 경계(총계 행)는 라벨 기준으로 전 열 공통
+    segs: list[tuple[int, list[int]]] = []
+    boundary = -1
+    for g in grands:
+        segs.append((g, [i for i in tv.body if boundary < i < g]))
+        boundary = g
+    # 열×세그먼트 독립 분해 — 편집으로 깨진 세그먼트만 기준열 구조를 빌린다
+    plans: dict[tuple[int, int], list | None] = {}
+    for c in cols:
+        prev_totals: list = []
+        for si, (g, rows) in enumerate(segs):
+            plans[(si, c)] = _parse_flat_segment(tv, c, g, rows, prev_totals)
+            gv = tv.value(g, c)
+            if gv is not None:
+                prev_totals.append((g, gv))
+
+    for si, (g, rows) in enumerate(segs):
+        ref_col = next((c for c in cols if plans[(si, c)]), None)
+        if ref_col is None:
+            if any(plans[(si, c)] is None for c in cols):
+                report.add("C2", "info", tv.where(g),
+                           "무들여쓰기 표의 합산 구조를 해석하지 못함 (전 열) — 수기 확인 권장")
+            continue
+        for c in cols:
+            plan = plans[(si, c)]
+            borrowed = False
+            if plan is None:
+                plan = plans[(si, ref_col)]
+                borrowed = True
+            for row, term_rows, kind in plan or []:
+                stated = tv.value(row, c)
+                terms = [(j, c, 1) for j in term_rows if tv.value(j, c) is not None]
+                if stated is None or not terms:
+                    continue
+                computed = sum(tv.value(j, cc) for j, cc, _ in terms)
+                ok = abs(computed - stated) <= _P.footing_tol
+                if not ok and borrowed and _shape_suspect(tv, c, ref_col, term_rows):
+                    # 기수 간 구성 변동(신규 계정 등)으로 트리 모양이 다를 수 있는
+                    # 지점 — 오탐 방지를 위해 단정(warn·수식) 대신 참고만
+                    report.add(
+                        "C2", "info", tv.where(row, c),
+                        f"{kind} 기재 {fmt(stated)} vs 기준열 구조 합 {fmt(computed)} — "
+                        f"기준열에서 0이던 항목이 있어 구조 이형 가능성 (참고)",
+                    )
+                    continue
+                report.tick("C2")
+                note = (f"무들여쓰기 {kind} footing"
+                        + (" (기준열 구조 적용)" if borrowed else ""))
+                report.result("C2", tv, row, c, stated, computed, ok, note, terms=terms)
+                if not ok:
+                    report.add(
+                        "C2", "warn", tv.where(row, c),
+                        f"{kind} 기재 {fmt(stated)} ≠ 구성 {len(terms)}개 합 "
+                        f"{fmt(computed)} (차이 {fmt(stated - computed)})",
+                    )
+
+
 def check_group_footing(views: list[TableView], report: CheckReport):
     for tv in views:
         # 손익계산서류는 들여쓰기가 계층이 아님(영업이익 뒤 1칸 들여쓰기,
@@ -516,11 +707,15 @@ def check_group_footing(views: list[TableView], report: CheckReport):
         if ("손익계산서" in norm(tv.sec_title) or "손익계산서" in norm(tv.context)
                 or "자본변동표" in norm(tv.sec_title) or _skip_section(tv)):
             continue
-        # 들여쓰기가 없는 회사 대응: 재무제표 표는 로마자 접두 계층으로 폴백
+        # 들여쓰기가 없는 회사 대응: 재무제표 표는 로마자 접두 계층으로 폴백,
+        # 로마자도 없으면(흥구형 IFRS) 총계-먼저 평면 전개로 footing
         depths = {tv.label_depth(i) for i in tv.body if tv.row_label(i)}
         if len(depths) < 2:
             if tv.sec_title in STATEMENT_KEYWORDS:
+                before = len(report.results)
                 _roman_group_footing(tv, report)
+                if len(report.results) == before:
+                    _flat_forward_footing(tv, report)
             continue
         body = tv.body
         for c in range(tv.ncols):
@@ -593,12 +788,12 @@ def check_total_rows(views: list[TableView], report: CheckReport):
             # 합계 라벨이 첫 열이 아닐 수 있음(구분|계정과목 양식) — 텍스트 셀 전체 판정
             labels = [norm(tv.text(i, c)) for c in range(tv.ncols)
                       if tv.text(i, c).strip() and tv.value(i, c) is None]
-            exact_total = any(TOTAL_RE.match(t) for t in labels)
+            exact_total = any(_P.total_re.match(t) for t in labels)
             grand_total = (not exact_total
-                           and any(GRAND_TOTAL_RE.search(t) for t in labels))
+                           and any(_P.grand_total_re.search(t) for t in labels))
             # '차감후 금액'·'…순액'도 합계행 (합계라는 단어 없는 결과 행 — 주석8 퇴직급여)
             deduct_total = (not exact_total and not grand_total
-                            and any(re.search(r"(차감후|공제후|순액$)", t) for t in labels))
+                            and any(_P.deduct_total_re.search(t) for t in labels))
             if not (exact_total or grand_total or deduct_total):
                 continue
             if grand_total and not _depth_diverse(tv):
@@ -635,9 +830,6 @@ def check_total_rows(views: list[TableView], report: CheckReport):
 # AUTOSUM(ROWPART)을 쓰지 않는 회사에서도 작동하는 구조 규칙.
 # 형제 = 그룹 헤더(COLSPAN)를 공유하는 열들, 그룹이 없으면 라벨·주석·합계류 외 전체.
 
-_TOTAL_HEADER_RE = re.compile(r"^(합\s*계|총\s*계|계)$")
-
-
 def _leaf_header(tv: TableView, c: int) -> str:
     for i in reversed(tv.head):
         gc = tv.grid[i][c]
@@ -671,16 +863,16 @@ def check_total_columns(views: list[TableView], report: CheckReport):
         if not tv.head or _skip_section(tv):
             continue
         total_cols = [c for c in range(tv.ncols)
-                      if _TOTAL_HEADER_RE.match(norm(_leaf_header(tv, c)))]
+                      if _P.total_header_re.match(norm(_leaf_header(tv, c)))]
         for c in total_cols:
             group = _header_group_cols(tv, c)
             if group:
                 siblings = [cc for cc in group if cc != c
-                            and not _TOTAL_HEADER_RE.match(norm(_leaf_header(tv, cc)))]
+                            and not _P.total_header_re.match(norm(_leaf_header(tv, cc)))]
             else:
                 siblings = [cc for cc in range(tv.ncols)
                             if cc != c
-                            and not _TOTAL_HEADER_RE.match(norm(_leaf_header(tv, cc)))
+                            and not _P.total_header_re.match(norm(_leaf_header(tv, cc)))
                             and "주석" not in norm(_leaf_header(tv, cc))]
             if not siblings:
                 continue
@@ -691,7 +883,7 @@ def check_total_columns(views: list[TableView], report: CheckReport):
                     continue
                 if "AUTOSUM" in node.attrs and node.attrs["AUTOSUM"].startswith("COL"):
                     continue  # 세로 자동합계 셀은 C1 담당 (가로합이 아님)
-                if _NONSUM_COL_RE.search(norm(tv.row_label(i))):
+                if _P.nonsum_col_re.search(norm(tv.row_label(i))):
                     continue  # 기대손실율 등 비율 행은 가로합 비대상
                 # 후보 2개: 형제 전체 / 첫 값 열 제외 — 만기분석표(장부금액|만기…|합계)는
                 # 합계가 만기 열들의 합이라 장부금액(첫 값 열)을 빼야 한다
@@ -743,9 +935,7 @@ def _amount_in_note(target: int, amounts: dict, bucket: str) -> bool:
     return False
 
 
-# 전역 검색 시 우연 일치 방지: 이 금액 미만은 참조 주석 안에서만 찾음 (주당이익 등)
-_GLOBAL_SEARCH_MIN = 1000
-
+# 전역 검색 시 우연 일치 방지: 최소 금액 미만은 참조 주석 안에서만 찾음 (주당이익 등)
 
 def check_fs_to_notes(ctx: dict, report: CheckReport):
     """참조번호 비의존 대사: 금액을 전체 주석에서 전역 검색하고, 참조번호는
@@ -779,13 +969,13 @@ def check_fs_to_notes(ctx: dict, report: CheckReport):
                 if bucket is None or v is None or v == 0:
                     continue
                 won = abs(v) * tv.unit  # 재무제표 표 단위 → 원화
-                if not refs and won < _GLOBAL_SEARCH_MIN:
+                if not refs and won < _P.global_search_min:
                     continue  # 참조도 없고 소액 — 대사 대상 아님
                 report.tick("C4")
 
                 ref_hit = [n for n in refs if found_in(n, won, bucket)]
                 global_hit = ([n for n in note_amounts if found_in(n, won, bucket)]
-                              if won >= _GLOBAL_SEARCH_MIN else ref_hit)
+                              if won >= _P.global_search_min else ref_hit)
                 display = sorted(set(refs) | set(global_hit))[:6]
 
                 if ref_hit:
@@ -837,17 +1027,12 @@ def check_fs_to_notes(ctx: dict, report: CheckReport):
 #   기타영업외비용이 음수(환입)여도 값 자체가 괄호라 부호 규칙이 성립 (실측 확인).
 # 라벨 힌트: "…(Ⅰ+Ⅱ+Ⅲ+Ⅳ)"처럼 합산식이 라벨에 명시된 행(현금흐름표)을 그대로 검산.
 
-_ANCHOR_RE = re.compile(
-    r"(총이익|총손실|영업이익|영업손실|차감전순이익|차감전순손실|순이익|순손실|순손익"
-    r"|총포괄손익|총포괄이익|총포괄손실)$"
-)
-_MINUS_RE = re.compile(r"(원가|비용|손실|판매비|법인세)")
 _ROMAN = "ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅪⅫ"
 _HINT_RE = re.compile(rf"\(([{_ROMAN}][+{_ROMAN}\s]*)\)$")
 
 
 def _pl_sign(label: str) -> int:
-    return -1 if _MINUS_RE.search(norm(label)) else 1
+    return -1 if _P.pl_minus_re.search(norm(label)) else 1
 
 
 def _label_core(label: str) -> str:
@@ -864,7 +1049,7 @@ def _check_pl_anchors(tv: TableView, report: CheckReport):
     body = tv.body
     anchors = [
         i for i in body
-        if _ANCHOR_RE.search(_label_core(tv.row_label(i)))
+        if _P.anchor_re.search(_label_core(tv.row_label(i)))
         and "주당" not in norm(tv.row_label(i))
         and any(tv.value(i, c) is not None for c in range(tv.ncols))
     ]
@@ -966,17 +1151,13 @@ def _check_hint_lines(tv: TableView, report: CheckReport):
 
 
 # '기초제품/기말상품' 등은 잔액 흐름이 아니라 원가 산식의 재고 항목
-_INVENTORY_RE = re.compile(r"^(기초|기말|당기말|전기말)(제품|상품|재고|원재료|재공품|저장품|미착)")
-# 평균·비율 성격의 열은 합산 관계가 성립하지 않음 (가중평균행사가격, 기대손실율 등)
-_NONSUM_COL_RE = re.compile(r"(가격|단가|주당|환율|이자율|할인율|손실율|율\)?$|비율)")
-
 
 def _flow_open(label: str) -> bool:
-    return "기초" in label and not _INVENTORY_RE.match(label)
+    return "기초" in label and not _P.inventory_re.match(label)
 
 
 def _flow_close(label: str) -> bool:
-    return "기말" in label and not _INVENTORY_RE.match(label)
+    return "기말" in label and not _P.inventory_re.match(label)
 
 
 def _check_socie(tv: TableView, report: CheckReport):
@@ -1048,7 +1229,7 @@ def _check_socie(tv: TableView, report: CheckReport):
                 stated = tv.value(i, c)
                 if stated is None or tv.value(opening, c) is None:
                     continue
-                if _NONSUM_COL_RE.search(norm(tv.col_header(c))):
+                if _P.nonsum_col_re.search(norm(tv.col_header(c))):
                     continue  # 평균 가격·비율 열은 흐름 합산 비대상
                 cands = []
                 for rows in candidates_rows:
@@ -1056,7 +1237,7 @@ def _check_socie(tv: TableView, report: CheckReport):
                     # 변동 표기 2관행: 괄호 음수(단순합) / 양수 기재+라벨 차감(부호합)
                     plain = [(opening, c, 1)] + [(j, c, 1) for j in valued_rows]
                     signed = [(opening, c, 1)] + [
-                        (j, c, -1 if _FLOW_MINUS_RE.search(norm(tv.row_label(j))) else 1)
+                        (j, c, -1 if _P.flow_minus_re.search(norm(tv.row_label(j))) else 1)
                         for j in valued_rows
                     ]
                     for terms in (plain, signed):
@@ -1080,9 +1261,6 @@ def _check_socie(tv: TableView, report: CheckReport):
         between.append(i)  # 섹션 라벨 행도 포함 — 섹션별 소계 판정의 경계로 쓰임
 
 
-_FLOW_MINUS_RE = re.compile(r"(처분|감소|상각|지급|환입|사용|제거|폐기|손상)")
-
-
 def _check_flow_columns(tv: TableView, report: CheckReport):
     """가로 흐름: 열이 기초|증감…|기말인 표(유형자산 변동표 등)에서
     각 행의 기말 = 기초 + 사이 열들. 증감이 괄호 음수면 단순합, 양수 표기면
@@ -1102,7 +1280,7 @@ def _check_flow_columns(tv: TableView, report: CheckReport):
         base = [(i, start, 1)]
         comps = [c for c in middle if tv.value(i, c) is not None]
         plain = base + [(i, c, 1) for c in comps]
-        signed = base + [(i, c, -1 if _FLOW_MINUS_RE.search(headers[c]) else 1)
+        signed = base + [(i, c, -1 if _P.flow_minus_re.search(headers[c]) else 1)
                          for c in comps]
         cands = [(sum(s * tv.value(i, cc) for _, cc, s in t), t)
                  for t in (plain, signed) if len(t) >= 2]
@@ -1134,19 +1312,13 @@ def check_statement_lines(views: list[TableView], report: CheckReport):
 
 # ── C5: 주석 ↔ 주석 대사 ─────────────────────────────────────────────
 
-_GENERIC_LABELS = {
-    "합계", "소계", "계", "구분", "기타", "당기", "전기", "기초", "기말",
-    "취득", "처분", "대체", "상각", "증가", "감소", "차감", "설정", "환입",
-}
-
-
 def check_note_to_note(ctx: dict, report: CheckReport):
     index: dict[tuple, dict] = {}  # (label, bucket) -> {note_no: set(|values|)}
     for n, tvs in ctx["notes"].items():
         for tv in tvs:
             for i in tv.body:
                 label = norm(tv.row_label(i))
-                if len(label) < 2 or label in _GENERIC_LABELS or is_total_label(label):
+                if len(label) < 2 or label in _P.generic_labels or is_total_label(label):
                     continue
                 for c in range(tv.ncols):
                     bucket = tv.period_bucket(c)
@@ -1184,7 +1356,7 @@ def check_format(doc: Document, views: list[TableView], report: CheckReport):
                 t = node.text
                 s = t.strip()
                 report.tick("C6")
-                m = UNIT_RE.search(s)
+                m = _P.unit_re.search(s)
                 if m:
                     units.setdefault(norm(m.group(1)), []).append(tv.where(i))
                 if not s:
@@ -1220,24 +1392,57 @@ CHECK_NAMES = {
     "C7": "재무제표 계산 라인 검증 (손익·자본변동·현금흐름)",
     "C4": "재무제표↔주석 대사 (참조번호 오류 감지)",
     "C5": "주석↔주석 대사",
+    "C8": "대사맵 (확정 대사쌍 검증)",
     "C6": "표기 검출",
 }
 
 
-def run_checks(doc: Document, only: set[str] | None = None) -> CheckReport:
-    report = CheckReport()
-    views, ctx = build_views(doc)
-    steps = {
-        "C1": lambda: check_autosum(views, report),
-        "C2": lambda: check_group_footing(views, report),
-        "C3": lambda: (check_total_rows(views, report),
-                       check_total_columns(views, report)),
-        "C7": lambda: check_statement_lines(views, report),
-        "C4": lambda: check_fs_to_notes(ctx, report),
-        "C5": lambda: check_note_to_note(ctx, report),
-        "C6": lambda: check_format(doc, views, report),
-    }
-    for key, fn in steps.items():
-        if only is None or key in only:
-            fn()
-    return report
+def _apply_suppressions(report: CheckReport):
+    """프로파일 suppress 규칙에 걸리는 발견 사항을 억제 목록으로 이동.
+
+    findings(콘솔·요약의 지적 사항)만 억제한다 — annotate가 심는 살아있는
+    검산 수식은 계산 결과 그대로 보여준다(수치를 감추지 않는 것이 원칙)."""
+    if not _P.suppress:
+        return
+    kept: list[Finding] = []
+    for f in report.findings:
+        rule = next((r for r in _P.suppress
+                     if r.matches(f.check, f.where, f.message)), None)
+        if rule is None:
+            kept.append(f)
+        else:
+            report.suppressed.append((f, rule.reason))
+    report.findings = kept
+
+
+def run_checks(doc: Document, only: set[str] | None = None,
+               profile: Profile | None = None) -> CheckReport:
+    with use_profile(profile):
+        report = CheckReport(profile_name=_P.name)
+        views, ctx = build_views(doc)
+        steps = {
+            "C1": lambda: check_autosum(views, report),
+            "C2": lambda: check_group_footing(views, report),
+            "C3": lambda: (check_total_rows(views, report),
+                           check_total_columns(views, report)),
+            "C7": lambda: check_statement_lines(views, report),
+            "C4": lambda: check_fs_to_notes(ctx, report),
+            "C5": lambda: check_note_to_note(ctx, report),
+            "C6": lambda: check_format(doc, views, report),
+        }
+        for key, fn in steps.items():
+            if only is None or key in only:
+                fn()
+        _apply_suppressions(report)
+        # 커버리지: 어느 표에 어떤 재무 검산이 적용됐는지 — "검증 안 된 표"의
+        # 침묵 통과를 막는다 (실행한 검사 기준)
+        applied: dict[str, set] = {}
+        for x in report.results:
+            applied.setdefault(x.table_id, set()).add(x.check)
+        report.coverage = [
+            {"table": tv.table.id, "context": tv.context,
+             "checks": sorted(applied.get(tv.table.id, ())),
+             "skipped": _skip_section(tv)}
+            for tv in views
+        ]
+        return report

@@ -29,8 +29,8 @@ from openpyxl.utils import get_column_letter
 
 from .check import CHECK_NAMES, CheckReport, fmt
 from .export_xlsx import (
-    FILL_HEAD, FILL_SUBHEAD, FONT, FONT_HEAD, FONT_SUBHEAD, FONT_TITLE, NUMFMT_INT,
-    THIN, _C, _T, refined_sections,
+    FILL_HEAD, FILL_SUBHEAD, FONT, FONT_HEAD, FONT_LINK, FONT_SUBHEAD, FONT_TITLE,
+    NUMFMT_INT, THIN, _C, _T, refined_sections,
 )
 from .model import Document
 
@@ -135,7 +135,9 @@ def _style(cell, font=FONT, border=True, align=None, numfmt=None):
     return cell
 
 
-def annotate(xlsx_path: str, report: CheckReport, doc: Document, row_positions: dict) -> dict:
+def annotate(xlsx_path: str, report: CheckReport, doc: Document, row_positions: dict,
+             tie_points: list | None = None, tie_suggestions: list | None = None,
+             profile=None) -> dict:
     wb = load_workbook(xlsx_path)
     pos_of = _cell_positions(doc, row_positions)
     note_sheets = _note_sheet_map(doc, pos_of)
@@ -252,13 +254,19 @@ def annotate(xlsx_path: str, report: CheckReport, doc: Document, row_positions: 
     # ── 주석 시트 하단 대사 블록 (C4·C5) ─────────────────────────
     written += _write_note_blocks(wb, report, pos_of, note_sheets, note_ranges, block_start)
 
+    # ── 대사맵 시트 (C8: 확정 검증 + 제안) ───────────────────────
+    tie_rows = 0
+    if tie_points is not None or tie_suggestions is not None:
+        tie_rows = _write_tie_sheet(wb, tie_points or [], tie_suggestions or [],
+                                    pos_of, profile)
+
     _write_summary(wb, report, addr_of)
 
     if _T.get("modernize"):
         _T["modernize"](wb)
     wb.save(xlsx_path)
     bad = sum(1 for x in report.results if not x.ok)
-    return {"cells": written, "bad": bad}
+    return {"cells": written, "bad": bad, "ties": tie_rows}
 
 
 def _write_note_blocks(wb, report, pos_of, note_sheets, note_ranges, block_start) -> int:
@@ -346,6 +354,183 @@ def _write_note_blocks(wb, report, pos_of, note_sheets, note_ranges, block_start
     return written
 
 
+def _write_tie_sheet(wb, points: list, suggestions: list, pos_of, profile) -> int:
+    """'대사맵' 시트: 확정 대사쌍의 살아있는 검증 + 제안 목록.
+
+    열 배치는 ties.read_tie_sheet와 계약: A=!t행ID, B=상태(사용자 편집),
+    C=ID, D=대사A, E=A금액(수식), F=관계, G=대사B, H=B금액(수식), I=기간,
+    J=판정(수식 — 확정만 recheck 게이트 대상), K=출처, L=비고(사용자 편집),
+    M=_data(JSON, 숨김 — ties save의 복원 원본)."""
+    import json as _json
+
+    from . import ties as ties_mod
+
+    if ties_mod.SHEET_NAME in wb.sheetnames:
+        del wb[ties_mod.SHEET_NAME]
+    ws = wb.create_sheet(ties_mod.SHEET_NAME, 0)
+    ws.column_dimensions["A"].hidden = True
+    ws.column_dimensions["M"].hidden = True
+    for col, w in (("B", 7), ("C", 11), ("D", 34), ("E", 14), ("F", 7),
+                   ("G", 34), ("H", 14), ("I", 7), ("J", 12), ("K", 16), ("L", 24)):
+        ws.column_dimensions[col].width = w
+    tid = iter(range(1, 100000))
+
+    def put(r, c, value, font=FONT, **kw):
+        ws.cell(row=r, column=1, value=f"!t{next(tid):05d}").font = FONT
+        return _style(ws.cell(row=r, column=c, value=value), font, **kw)
+
+    put(2, 2, "대사맵 — 확정 대사쌍 검증 · 제안", FONT_TITLE, border=False)
+    put(3, 2, "상태(확정/제안/제외)·비고 열만 수정하세요 → `dsdxlsx ties save 파일.xlsx` 로 "
+              "저장. 확정은 매 check마다 엄격 검증(불일치 빨강), 제외는 다시 제안되지 않음.",
+        border=False)
+
+    r = 5
+    headers = ["상태", "ID", "대사 A", "A 금액", "관계", "대사 B", "B 금액",
+               "기간", "판정", "출처·신뢰도", "비고", "_data"]
+    for c, h in enumerate(headers, start=2):
+        cell = put(r, c, h, FONT_HEAD, align=Alignment(horizontal="center"))
+        cell.fill = FILL_HEAD
+    first_data = r + 1
+    r += 1
+
+    rel_ko = {"equal": "=", "negate": "= (−)", "abs": "|=|"}
+
+    def amount_cell(row, col, hit, gc):
+        cell = put(row, col, None, align=Alignment(horizontal="right"), numfmt=NUMFMT_INT)
+        loc = pos_of.get(hit.row_id) if hit else None
+        if loc is not None and gc is not None:
+            cell.value = f"='{loc[0]}'!{get_column_letter(2 + gc)}{loc[1]}"
+        elif hit is not None and gc is not None:
+            cell.value = _num(hit.value(gc))
+        return cell
+
+    def loc_cell(row, col, sel, hit):
+        cell = put(row, col, sel.human())
+        loc = pos_of.get(hit.row_id) if hit else None
+        if loc is not None:
+            cell.hyperlink = f"#'{loc[0]}'!A{loc[1]}"
+            cell.font = FONT_LINK
+        return cell
+
+    def term(addr, unit, absolute):
+        t = f"ABS({addr})" if absolute else addr
+        return f"({t}*{unit})" if unit != 1 else t
+
+    def write_row(pt, gating: bool):
+        nonlocal r
+        tie = pt.tie
+        put(r, 2, ties_mod.STATUS_KO.get(tie.status, tie.status),
+            align=Alignment(horizontal="center"))
+        put(r, 3, tie.id, align=Alignment(horizontal="center"))
+        loc_cell(r, 4, tie.a, pt.a)
+        amount_cell(r, 5, pt.a, pt.a_col)
+        put(r, 6, rel_ko.get(tie.relation, tie.relation),
+            align=Alignment(horizontal="center"))
+        loc_cell(r, 7, tie.b, pt.b)
+        amount_cell(r, 8, pt.b, pt.b_col)
+        put(r, 9, pt.bucket, align=Alignment(horizontal="center"))
+        verdict = put(r, 10, None, align=Alignment(horizontal="center"),
+                      numfmt=NUMFMT_INT)
+        if pt.a is None or pt.b is None or pt.a_col is None or pt.b_col is None:
+            # 확정인데 해석 불가 → recheck 게이트가 잡도록 마커(,TRUE,) 있는 수식으로
+            verdict.value = ('=IF(FALSE,TRUE,"해석불가")' if gating else "해석불가")
+            put(r, 11, f"{tie.origin} — {pt.reason}"[:60])
+        else:
+            ua, ub = pt.a.tv.unit, pt.b.tv.unit
+            tol = max(ua, ub) if ua != ub else (profile.footing_tol if profile else 1)
+            absolute = tie.relation == "abs"
+            ta = term(f"E{r}", ua, absolute)
+            tb = term(f"H{r}", ub, absolute)
+            if tie.relation == "negate":
+                tb = f"(-{tb})"
+            good, bad_ = ("TRUE", f"{ta}-{tb}") if gating else ('"일치"', '"상이"')
+            verdict.value = f"=IF(ABS({ta}-{tb})<={tol},{good},{bad_})"
+            conf = f" ({tie.confidence})" if tie.confidence else ""
+            put(r, 11, f"{tie.origin}{conf}")
+        put(r, 12, tie.note)
+        data = put(r, 13, _json.dumps(tie.to_dict(), ensure_ascii=False), border=False)
+        data.font = Font(name=_T["font"], size=6, color="BBBBBB")
+        r += 1
+
+    for pt in points:
+        write_row(pt, gating=True)
+    for pt in suggestions:
+        write_row(pt, gating=False)
+
+    if r > first_data:
+        col_j = get_column_letter(10)
+        ws.conditional_formatting.add(
+            f"{col_j}{first_data}:{col_j}{r - 1}",
+            FormulaRule(
+                formula=[f'AND({col_j}{first_data}<>"",{col_j}{first_data}<>TRUE,'
+                         f'{col_j}{first_data}<>"일치")'],
+                fill=_FILL_BAD, font=_FONT_BAD,
+            ),
+        )
+    ws.freeze_panes = f"B{first_data}"
+    return r - first_data
+
+
+AI_SHEET = "AI검토"
+
+
+def annotate_ai(xlsx_path: str, findings: list[dict], doc: Document,
+                row_positions: dict) -> dict:
+    """AI 검토 소견(findings.json)을 'AI검토' 시트로 기록.
+
+    check가 다시 실행돼도 이 시트는 지우지 않는다(검증요약과 분리) — annotate-ai
+    재실행 시에만 교체. 행 ID는 `!a…`라 import가 무시한다. 모든 소견은
+    advisory — 반영 여부는 사람이 본문을 직접 고쳐서 결정한다."""
+    wb = load_workbook(xlsx_path)
+    pos_of = _cell_positions(doc, row_positions)
+    if AI_SHEET in wb.sheetnames:
+        del wb[AI_SHEET]
+    ws = wb.create_sheet(AI_SHEET, 0)
+    ws.column_dimensions["A"].hidden = True
+    for col, w in (("B", 8), ("C", 8), ("D", 34), ("E", 64), ("F", 44)):
+        ws.column_dimensions[col].width = w
+    aid = iter(range(1, 100000))
+
+    def put(r, c, value, font=FONT, **kw):
+        ws.cell(row=r, column=1, value=f"!a{next(aid):05d}").font = FONT
+        return _style(ws.cell(row=r, column=c, value=value), font, **kw)
+
+    put(2, 2, "AI 검토 소견", FONT_TITLE, border=False)
+    put(3, 2, f"실행: {datetime.now():%Y-%m-%d %H:%M} — 전 항목 참고용(advisory). "
+              "반영은 본문 셀을 직접 수정한 뒤 check 재실행으로 검산하세요.",
+        border=False)
+
+    r = 5
+    for c, h in enumerate(["심각도", "구분", "위치", "내용", "제안"], start=2):
+        cell = put(r, c, h, FONT_HEAD, align=Alignment(horizontal="center"))
+        cell.fill = FILL_HEAD
+    r += 1
+    order = {"warn": 0, "info": 1}
+    for f in sorted(findings, key=lambda x: order.get(x.get("severity"), 2)):
+        sev = f.get("severity", "info")
+        sev_cell = put(r, 2, sev, align=Alignment(horizontal="center"))
+        if sev == "warn":
+            sev_cell.fill = _FILL_BAD
+            sev_cell.font = _FONT_BAD
+        put(r, 3, f.get("kind", ""), align=Alignment(horizontal="center"))
+        loc_text = f.get("section", "") or ""
+        rid = f.get("row_id", "")
+        loc = pos_of.get(rid) if rid else None
+        if rid:
+            loc_text = f"{loc_text} · {rid}" if loc_text else rid
+        cell = put(r, 4, loc_text)
+        if loc is not None:
+            cell.hyperlink = f"#'{loc[0]}'!A{loc[1]}"
+            cell.font = FONT_LINK
+        put(r, 5, f.get("message", ""),
+            align=Alignment(wrap_text=True, vertical="center"))
+        put(r, 6, f.get("suggestion", ""),
+            align=Alignment(wrap_text=True, vertical="center"))
+        r += 1
+    wb.save(xlsx_path)
+    return {"findings": len(findings)}
+
+
 def _write_summary(wb, report, addr_of):
     if SUMMARY_SHEET in wb.sheetnames:
         del wb[SUMMARY_SHEET]
@@ -422,3 +607,19 @@ def _write_summary(wb, report, addr_of):
             put(r, 8, f.message,
                 alignment=Alignment(wrap_text=True, vertical="center"))
             r += 1
+
+    if report.coverage:
+        covered = sum(1 for c in report.coverage if c["checks"])
+        skipped = sum(1 for c in report.coverage if c["skipped"] and not c["checks"])
+        uncovered = [c for c in report.coverage
+                     if not c["skipped"] and not c["checks"]]
+        r += 1
+        put(r, 2, f"검사 커버리지 — 표 {len(report.coverage)}개: 검산 적용 {covered} · "
+                  f"제외 구획 {skipped} · 미적용 {len(uncovered)}", FONT_TITLE)
+        r += 1
+        if uncovered:
+            put(r, 2, "재무 검산이 하나도 적용되지 않은 표 — 구조 미인식 가능성, 육안 확인 권장:")
+            r += 1
+            for c in uncovered:
+                put(r, 2, f"{c['context']} · {c['table']}")
+                r += 1

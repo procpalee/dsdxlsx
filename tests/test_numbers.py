@@ -63,3 +63,25 @@ def test_values_equal():
     assert not numbers.values_equal(0, "1,000")
     assert not numbers.values_equal(1, "2")
     assert not numbers.values_equal("텍스트", "다른 텍스트")
+
+
+def test_classify_triangle_negative():
+    """일부 회사의 △/▲ 음수 표기 (괄호 관례와 병행 실존)."""
+    assert numbers.classify("△1,234") == -1234
+    assert numbers.classify("▲ 232,116,145") == -232116145
+    assert numbers.classify("△1,234주") == -1234  # 접미 단위와 결합
+    assert numbers.classify("△") is None
+
+
+def test_to_dsd_text_follows_original_notation():
+    """수정 셀 재기입 시 원본 셀의 음수 관례를 따른다 — 표기 혼용 방지."""
+    assert numbers.to_dsd_text(-1234) == "(1,234)"
+    assert numbers.to_dsd_text(-1234, like="△1,000") == "△1,234"
+    assert numbers.to_dsd_text(-1234, like="▲1,000") == "▲1,234"
+    assert numbers.to_dsd_text(-1234, like="(1,000)") == "(1,234)"
+    assert numbers.to_dsd_text(1234, like="△1,000") == "1,234"  # 양수는 기호 없음
+
+
+def test_values_equal_triangle_roundtrip():
+    assert numbers.values_equal(-1234, "△1,234")   # 무수정 판정
+    assert not numbers.values_equal(-1235, "△1,234")

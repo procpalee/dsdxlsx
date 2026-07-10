@@ -36,15 +36,20 @@ def read_dsd(path: str) -> DsdPackage:
 
 
 def patch_meta_size(meta: bytes, new_size: int) -> bytes:
-    """FILE-INFO의 size 속성만 새 contents.xml 크기로 치환."""
+    """FILE-INFO의 size 속성만 새 contents.xml 크기로 치환.
+
+    회사·편집기 버전에 따라 size=""(빈 값)이거나 FILE-INFO 자체가 없는
+    meta.xml이 실존한다(K-GAAP 샘플 실측). 그 경우 편집기가 쓴 형태를
+    그대로 유지한다 — 빈 값은 빈 값대로, 없으면 없는 대로.
+    """
     def repl(m: re.Match) -> bytes:
+        if not m.group(2):  # size="" → 원본 관례 유지
+            return m.group(0)
         return m.group(1) + str(new_size).encode() + m.group(3)
 
-    patched, n = re.subn(
-        rb'(<FILE-INFO\b[^>]*?size=")(\d+)(")', repl, meta, count=1
+    patched, _ = re.subn(
+        rb'(<FILE-INFO\b[^>]*?size=")(\d*)(")', repl, meta, count=1
     )
-    if n != 1:
-        raise ValueError("meta.xml에서 FILE-INFO size 속성을 찾지 못함")
     return patched
 
 
