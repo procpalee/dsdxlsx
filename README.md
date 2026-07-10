@@ -34,6 +34,9 @@ uv run --no-editable dsdxlsx verify 원본.dsd 수정본.dsd
 # 5) 정합성 검증 (수정 후 필수 — DART 편집기는 본문 합계를 자동 재계산하지 않음)
 uv run --no-editable dsdxlsx check 편집한파일.xlsx      # 저장한 편집 상태 그대로 검사
 uv run --no-editable dsdxlsx check 수정본.dsd --only C1,C4
+
+# 6) 헤드리스 재검증 (Excel 없이 검산 수식 평가 — 무인 파이프라인·CI·에이전트용)
+uv run --no-editable dsdxlsx recheck 편집한파일.xlsx    # check가 심은 =IF(...,TRUE,...) 수식 평가
 ```
 
 xlsx를 check하면 검증 결과가 **그 파일 안에 살아있는 엑셀 수식으로** 기록된다
@@ -53,6 +56,24 @@ xlsx를 check하면 검증 결과가 **그 파일 안에 살아있는 엑셀 수
 
 xlsx check는 임베드 원본이 아니라 **현재 편집 상태**(저장된 셀 수정·행 추가 반영)를 검사한다.
 `.dsd`를 check하면 콘솔 출력만, `-o 파일.xlsx`로 별도 리포트 저장 가능.
+
+### recheck — 헤드리스 재검증 (Excel 없이)
+
+check가 심는 검산 셀은 **살아있는 엑셀 수식**이라 원래 Excel로 열어야만 TRUE/차이로 평가된다
+(openpyxl은 캐시가 없어 못 읽음). `recheck`는 이 `=IF(…,TRUE,…)` 수식을 **OfficeCLI 수식엔진으로
+헤드리스 평가**해 통과/불일치를 판정한다 — 무인 파이프라인·CI·에이전트가 "이 조서가 검산을
+통과했나?"를 Excel 없이 확인할 수 있다. 판정은 check.py와 동일한 ±1 절사 허용을 따르며,
+불일치가 하나라도 있으면 **종료코드 1**(게이트로 사용 가능).
+
+```powershell
+uv run --no-editable dsdxlsx recheck 편집한파일.xlsx
+#   검산 셀 N개 — 통과 / 불일치(차이 금액) / 미확인(대사 근거 없음) 집계
+```
+
+- 사전조건: OfficeCLI 바이너리 (`npm i -g @officecli/officecli`). 미설치 시 안내 후 종료코드 2.
+- 구현: `verify_annotated.py` — officecli만 직접 호출(외부 라이브러리 미의존). 원본 xlsx 불변(읽기만).
+- 주의: C4 대사는 크로스시트 COUNTIF 수식을 쓴다. 실측상 OfficeCLI가 정상 평가하지만,
+  '미확인'이 나오면 Excel로 재확인을 권한다.
 
 ### check 검사 항목 (전부 규칙 기반)
 

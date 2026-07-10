@@ -63,6 +63,18 @@ def cmd_verify(args) -> int:
     return 0
 
 
+def cmd_recheck(args) -> int:
+    """annotate된 xlsx의 살아있는 검산 수식을 Excel 없이(OfficeCLI) 재평가."""
+    from .verify_annotated import officecli_available, verify_annotated
+
+    if not officecli_available():
+        print("officecli 미설치 — npm i -g @officecli/officecli", file=sys.stderr)
+        return 2
+    rep = verify_annotated(args.xlsx)
+    print(rep)
+    return 0 if rep.ok else 1
+
+
 def cmd_check(args) -> int:
     from .annotate_xlsx import annotate
     from .check import CHECK_NAMES, run_checks
@@ -153,6 +165,13 @@ def main(argv=None) -> int:
     p.add_argument("--only", help="쉼표 구분 검사 선택 (예: C1,C4)")
     p.add_argument("-o", "--out", help="검증 결과 엑셀 경로 (기본: <대상>_검증.xlsx)")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser(
+        "recheck",
+        help="annotate된 xlsx의 검산 수식을 Excel 없이 재평가 (헤드리스, OfficeCLI 필요)",
+    )
+    p.add_argument("xlsx")
+    p.set_defaults(func=cmd_recheck)
 
     args = ap.parse_args(argv)
     try:
