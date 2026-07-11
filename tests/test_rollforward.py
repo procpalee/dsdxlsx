@@ -82,6 +82,77 @@ def test_roll_unpaired_table_untouched():
     assert any(i.grade == "미처리" and "대칭" in i.note for i in report.items)
 
 
+def test_roll_paired_tables_wholesale_swap():
+    """세로형: '1) 당기말' 표 ↔ '2) 전기말' 표 — 행 구성이 달라도(파생 신규)
+    전기 표를 구 당기 표 클론으로 통째 교체, 당기 표 값은 비움."""
+    contents = factory.document(
+        factory.p("표지"),
+        factory.title("재무제표", 2),
+        factory.statement_title_table("재 무 상 태 표"),
+        factory.table([["과목", "제 2(당) 기말", "제 1(전) 기말"]],
+                      [["현금", "100", "90"], ["자산총계", "100", "90"]], unit="원"),
+        factory.title("주석", 3),
+        factory.p("1. 일반사항\n내용"),
+        factory.p("4. 금융상품의 범주\n(1) 금융자산의 범주\n1) 당기말"),
+        factory.table([["구  분", "금  액"]],
+                      [["현금및현금성자산", "100"], ["파생상품자산", "50"],
+                       ["합  계", "150"]], unit="원"),
+        factory.p("2) 전기말"),
+        factory.table([["구  분", "금  액"]],
+                      [["현금및현금성자산", "90"], ["합  계", "90"]], unit="원"),
+    )
+    doc2, report = _rolled(contents)
+    note_tables = [t for t in doc2.tables.values()
+                   if any("현금및현금성자산" in c.text or "파생" in c.text
+                          for r in t.rows for c in r.cells)]
+    cur_t, prev_t = note_tables[-2], note_tables[-1]
+    prev_texts = [c.text for r in prev_t.rows for c in r.cells]
+    # 전기 표 = 구 당기 표 내용 (파생 행 포함, 값 그대로)
+    assert "파생상품자산" in prev_texts and "150" in prev_texts and "50" in prev_texts
+    assert len(prev_t.rows) == len(cur_t.rows)
+    # 당기 표는 값이 비고 라벨은 유지
+    cur_texts = [c.text for r in cur_t.rows for c in r.cells]
+    assert "파생상품자산" in cur_texts
+    assert "150" not in cur_texts and "100" not in cur_texts
+    assert any("표 교체" in i.item for i in report.items if i.grade == "자동확정")
+    assert any(p[0] == "table" for p in report.painted)
+
+
+def test_roll_socie_block_swap_and_carryover():
+    contents = factory.document(
+        factory.p("표지"),
+        factory.title("자본변동표", 2),
+        factory.table(
+            [["과  목", "자본금", "이익잉여금", "총  계"]],
+            [
+                ["전기초 잔액", "100", "500", "600"],
+                ["당기순이익", "-", "50", "50"],
+                ["전기말 잔액", "100", "550", "650"],
+                ["당기초 잔액", "100", "550", "650"],
+                ["유상증자", "50", "-", "50"],
+                ["당기순이익", "-", "60", "60"],
+                ["당기말 잔액", "150", "610", "760"],
+            ],
+            unit="원",
+        ),
+    )
+    doc2, report = _rolled(contents)
+    t = next(t for t in doc2.tables.values()
+             if any("잔액" in c.text for r in t.rows for c in r.cells))
+    rows = [[c.text for c in r.cells] for r in t.rows if not r.in_thead]
+    labels = [r[0] for r in rows]
+    # 전기 블록 = 구 당기 블록 (라벨 플립 + 유상증자 행 포함 — 4행으로 늘어남)
+    assert labels[:4] == ["전기초 잔액", "유상증자", "당기순이익", "전기말 잔액"]
+    assert rows[0][1:] == ["100", "550", "650"]   # 신 전기초 = 구 당기초
+    assert rows[3][1:] == ["150", "610", "760"]   # 신 전기말 = 구 당기말
+    # 당기 블록: 당기초 ← 구 당기말(이월), 변동·당기말은 빈 값
+    i_open = labels.index("당기초 잔액")
+    assert rows[i_open][1:] == ["150", "610", "760"]
+    assert all(v == "" for r in rows[i_open + 1:] for v in r[1:])
+    assert any(p[0] == "socie" for p in report.painted)
+    assert any("블록 교체" in i.item for i in report.items)
+
+
 def test_roll_cli_outputs_and_report_sheet(tmp_path, monkeypatch, capsys):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "전기.dsd").write_bytes(factory.dsd_bytes(factory.standard_contents()))

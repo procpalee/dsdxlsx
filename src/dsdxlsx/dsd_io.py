@@ -53,8 +53,32 @@ def patch_meta_size(meta: bytes, new_size: int) -> bytes:
     return patched
 
 
+class _RawNameInfo(zipfile.ZipInfo):
+    """원본 zip의 파일명 바이트·인코딩 플래그를 그대로 보존.
+
+    Python zipfile은 비ASCII 파일명을 무조건 UTF-8(+flag 0x800)로 다시 쓰지만,
+    DART 편집기가 만든 zip은 첨부 이미지의 한글 이름을 cp949(플래그 없음)로
+    저장한다. 재패킹에서 이름 바이트가 바뀌면 meta.xml의 IMG 참조와 어긋나
+    편집기가 파일 열기를 거부한다 (실측 — 날인 이미지 동봉 문서)."""
+
+    def _encodeFilenameFlags(self):
+        raw = getattr(self, "_raw_name", None)
+        if raw is not None:
+            return raw, self.flag_bits | self._raw_encoding_flag
+        return super()._encodeFilenameFlags()
+
+
+def _raw_name_bytes(info: zipfile.ZipInfo) -> bytes:
+    """읽을 때 디코드된 파일명 → 원본 헤더 바이트 복원.
+    zipfile은 flag 0x800이면 UTF-8, 아니면 cp437로 디코드했다 — 둘 다 무손실."""
+    if info.flag_bits & 0x800:
+        return info.filename.encode("utf-8")
+    return info.filename.encode("cp437")
+
+
 def write_dsd(path: str, package: DsdPackage, new_contents: bytes) -> None:
-    """수정된 contents.xml로 DSD 재패킹. 무수정이면 meta도 원본 바이트 유지."""
+    """수정된 contents.xml로 DSD 재패킹. 무수정 엔트리(첨부 이미지 포함)는
+    이름 바이트·플래그까지 원본 그대로 유지."""
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
         for info, data in package.entries:
             name = info.filename.lower()
@@ -62,7 +86,11 @@ def write_dsd(path: str, package: DsdPackage, new_contents: bytes) -> None:
                 data = new_contents
             elif name == "meta.xml" and new_contents != package.contents:
                 data = patch_meta_size(data, len(new_contents))
-            out = zipfile.ZipInfo(info.filename, date_time=info.date_time)
+            out = _RawNameInfo(info.filename, date_time=info.date_time)
             out.compress_type = zipfile.ZIP_DEFLATED
             out.external_attr = info.external_attr
+            out.internal_attr = info.internal_attr
+            out.create_system = info.create_system
+            out._raw_name = _raw_name_bytes(info)
+            out._raw_encoding_flag = info.flag_bits & 0x800
             zf.writestr(out, data)

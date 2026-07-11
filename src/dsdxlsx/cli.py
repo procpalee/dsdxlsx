@@ -303,9 +303,17 @@ def cmd_rollforward(args) -> int:
     doc2 = parse_contents(rolled)
     with open(out_dsd, "rb") as f:
         export_xlsx(doc2, f.read(), out_dsd, out_xlsx)
+    n_paint = 0
+    if report.painted:
+        from .import_xlsx import import_xlsx as _imp
+        _, _, imp2 = _imp(out_xlsx)
+        n_paint = rf.paint_moved(out_xlsx, doc2, report.painted,
+                                 imp2.row_positions)
     rf.write_roll_sheet(out_xlsx, report)
 
     print(f"롤포워드 완료: {out_xlsx} (당기 기초 DSD: {out_dsd})")
+    if n_paint:
+        print(f"  자동 이동·채움 값 {n_paint}칸을 파란 배경으로 표시했습니다.")
     print(f"  자동확정 {report.count('자동확정')}건 / 확인필요 {report.count('확인필요')}건 / "
           f"미처리 {report.count('미처리')}건 — '롤포워드' 시트에서 위에서부터 처리")
     for item in report.items:
