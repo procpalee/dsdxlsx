@@ -236,6 +236,45 @@ def cmd_annotate_ai(args) -> int:
     return 0
 
 
+def cmd_rollforward(args) -> int:
+    """전기 DSD → 당기 기초 DSD + 표준 정산표(xlsx, '롤포워드' 리포트 시트 포함)."""
+    from . import rollforward as rf
+    from . import splice
+    from .export_xlsx import export_xlsx
+    from .profile import resolve_profile
+
+    package = read_dsd(args.dsd)
+    doc = parse_contents(package.contents)
+    try:
+        meta = package.meta
+    except FileNotFoundError:
+        meta = None
+    profile = resolve_profile(meta, getattr(args, "profile", None))
+
+    ops, report = rf.roll_ops(doc, profile)
+    rolled = splice.apply(package.contents, ops)
+    parse_contents(rolled)  # well-formedness
+
+    base = os.path.splitext(args.out or args.dsd)[0]
+    if not args.out:
+        base += "_차기기초"
+    out_dsd, out_xlsx = base + ".dsd", base + ".xlsx"
+    write_dsd(out_dsd, package, rolled)
+    doc2 = parse_contents(rolled)
+    with open(out_dsd, "rb") as f:
+        export_xlsx(doc2, f.read(), out_dsd, out_xlsx)
+    rf.write_roll_sheet(out_xlsx, report)
+
+    print(f"롤포워드 완료: {out_xlsx} (당기 기초 DSD: {out_dsd})")
+    print(f"  자동확정 {report.count('자동확정')}건 / 확인필요 {report.count('확인필요')}건 / "
+          f"미처리 {report.count('미처리')}건 — '롤포워드' 시트에서 위에서부터 처리")
+    for item in report.items:
+        if item.grade == "미처리":
+            print(f"  [미처리] {item.where}: {item.item} — {item.note}")
+    print("  당기 열은 비어 있습니다 — 결산 수치 입력 후 `dsdxlsx check`로 검산하세요.")
+    return 0
+
+
 def cmd_renumber(args) -> int:
     """주석 재번호 — 헤딩·FS 참조 열은 자동, 서술 멘션은 확인필요 목록.
     재번호 전후 C4 대사 결과 동형성 게이트를 통과해야 파일을 만든다."""
@@ -446,6 +485,15 @@ def main(argv=None) -> int:
     )
     p.add_argument("xlsx")
     p.set_defaults(func=cmd_recheck)
+
+    p = sub.add_parser(
+        "rollforward",
+        help="전기 DSD → 당기 기초 DSD + 표준 정산표 (기수·TU +1, 당기값→전기 열, 3등급 리포트)",
+    )
+    p.add_argument("dsd", help="전기(직전 보고서) DSD")
+    p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
+    p.add_argument("-o", "--out", help="출력 기본 경로 (기본: <이름>_차기기초.*)")
+    p.set_defaults(func=cmd_rollforward)
 
     p = sub.add_parser(
         "renumber",
