@@ -42,6 +42,16 @@ uv run --no-editable dsdxlsx rollforward 전기.dsd        # → 전기_차기�
 #    → 맨 앞 '롤포워드' 시트에 3등급 전건 목록. 수치 입력 후 check로 검산.
 #    ⚠ +1년 롤(연차·동일분기) 전제 — 보고서 종류 전환(분기→반기)은 지원 안 함
 
+# 1-2) 상위 합계 자동 재계산 (결산 수치 입력 후 — DART 편집기는 합계를 재계산 안 함)
+uv run --no-editable dsdxlsx refoot 정산표.xlsx           # 미리보기 (기본)
+uv run --no-editable dsdxlsx refoot 정산표.xlsx --apply   # 실제 기입
+#    구조 고정: 전기 열에서 '정확 일치'로 검증된 합산 구조(C1/C2/C3/C7)만 당기 열에
+#    적용 — 빈 합계는 채우고 틀린 합계는 수정, 중첩 소계는 고정점 연쇄
+#    (미처분이익잉여금 → 이익잉여금 → 자본총계 → 부채및자본총계).
+#    안전장치: 전기 구성값 전부 0(구조 미결정)·±1 절사/손실 절대값 매치(보정 경로)·
+#    무들여쓰기 표(열별 트리)는 고정 근거에서 제외. 구성 셀 미입력이면 보류로 표시.
+#    xlsx 셀만 기입(DSD 불변) — 심리 완료 원본 8개사에서 제안 0건(오기입 게이트).
+
 # 2-1) 주석 번호 정리 (독립 명령 — 삭제 후 공백 밀착 등)
 uv run --no-editable dsdxlsx renumber 파일.dsd --close-gap      # 1,2,3,5 → 5를 4로
 uv run --no-editable dsdxlsx renumber 파일.dsd --map "15:16,16:17" [--strict]

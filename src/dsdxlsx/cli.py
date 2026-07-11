@@ -236,6 +236,46 @@ def cmd_annotate_ai(args) -> int:
     return 0
 
 
+def cmd_refoot(args) -> int:
+    """상위 합계 자동 재계산 — 검증 통과한 전기 열의 구조를 당기 열에 적용.
+    기본 미리보기, --apply 시 xlsx 셀에 기입 (DSD는 불변 — import 시 반영)."""
+    from . import refoot as rf
+    from .check import run_checks
+    from .import_xlsx import import_xlsx
+    from .profile import resolve_profile
+
+    package, contents, imp = import_xlsx(args.xlsx)
+    doc = parse_contents(contents)
+    try:
+        meta = package.meta
+    except FileNotFoundError:
+        meta = None
+    profile = resolve_profile(meta, getattr(args, "profile", None))
+    report = run_checks(doc, profile=profile)
+    items, skips = rf.refoot_plan(doc, report, imp.row_positions, profile)
+
+    for s in skips[:12]:
+        print(f"[보류] {s.context} '{s.label}': {s.reason}")
+    if len(skips) > 12:
+        print(f"[보류] … 외 {len(skips) - 12}건")
+    if not items:
+        print("재계산 제안 없음 — 상위 합계가 전부 일치하거나(정상) 구성 셀이 미입력입니다.")
+        return 0
+    print(f"재계산 제안 {len(items)}건"
+          + ("" if args.apply else " (미리보기 — 실제 기입은 --apply)") + ":")
+    for it in items:
+        print("  " + it.describe())
+    if args.apply:
+        try:
+            n = rf.apply_refoot(args.xlsx, items)
+        except PermissionError:
+            print(f"오류: {args.xlsx} 이(가) 엑셀에서 열려 있어 기입할 수 없습니다.",
+                  file=sys.stderr)
+            return 1
+        print(f"\n{n}건 기입 완료 — `dsdxlsx check` 재실행으로 검산하세요.")
+    return 0
+
+
 def cmd_rollforward(args) -> int:
     """전기 DSD → 당기 기초 DSD + 표준 정산표(xlsx, '롤포워드' 리포트 시트 포함)."""
     from . import rollforward as rf
@@ -485,6 +525,15 @@ def main(argv=None) -> int:
     )
     p.add_argument("xlsx")
     p.set_defaults(func=cmd_recheck)
+
+    p = sub.add_parser(
+        "refoot",
+        help="상위 합계 자동 재계산 — 전기 열의 검증된 구조를 당기 열에 적용 (미리보기 기본)",
+    )
+    p.add_argument("xlsx", help="편집 중인 정산표 (export/rollforward 산출)")
+    p.add_argument("--apply", action="store_true", help="제안을 실제 셀에 기입")
+    p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
+    p.set_defaults(func=cmd_refoot)
 
     p = sub.add_parser(
         "rollforward",
