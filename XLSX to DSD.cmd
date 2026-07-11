@@ -1,11 +1,14 @@
 @echo off
-rem Drag & drop an edited .xlsx (made by dsdxlsx export) onto this script
-rem -> creates a new .dsd next to it (original DSD is embedded in the xlsx)
+chcp 65001 >nul
 cd /d "%~dp0"
-if "%~1"=="" (
-    echo Usage: drag and drop an .xlsx file onto this script.
-    pause
-    exit /b 1
-)
+if "%~1"=="" goto :usage
 uv run --no-editable dsdxlsx import "%~1"
+echo.
+pause
+exit /b 0
+:usage
+echo.
+echo  [import] Drag an edited .xlsx onto this script -^> creates a new .dsd.
+echo  (The original DSD is embedded in the xlsx, so only the xlsx is needed.)
+echo.
 pause
