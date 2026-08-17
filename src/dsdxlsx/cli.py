@@ -323,6 +323,98 @@ def cmd_rollforward(args) -> int:
     return 0
 
 
+def _load_doc(path: str):
+    package = read_dsd(path)
+    return package, parse_contents(package.contents)
+
+
+def cmd_roll_interim(args) -> int:
+    """분·반기 당전기 밀기 — 직전 중간보고서 DSD(골격) → 다음 분기 DSD + 정산표.
+    종료코드: 0 완료 / 1 확인필요·미처리 있음 / 2 오류(연차 문서 등)."""
+    from . import period as P
+    from . import rollforward as rf
+    from . import rollinterim as ri
+    from . import splice
+    from .profile import regname_of, resolve_profile
+
+    package, doc = _load_doc(args.dsd)
+    base = P.detect_period(doc)
+    if base is None:
+        print("오류: 골격 DSD 에서 보고기간(TU PERIODTO)을 읽지 못했습니다", file=sys.stderr)
+        return 2
+    if base.is_annual:
+        print("오류: 감사보고서(연차) DSD 입니다 — 연차 밀기는 `dsdxlsx rollforward` 를 쓰세요",
+              file=sys.stderr)
+        return 2
+    try:
+        target = P.parse_target(getattr(args, "target", None), base)
+    except ValueError as e:
+        print(f"오류: {e}", file=sys.stderr)
+        return 2
+    try:
+        meta = package.meta
+    except FileNotFoundError:
+        meta = None
+    profile = resolve_profile(meta, getattr(args, "profile", None))
+    company = regname_of(meta) if meta else ""
+
+    doc_b = doc_c = None
+    if getattr(args, "prior_same", None):
+        _, doc_b = _load_doc(args.prior_same)
+        pb = P.detect_period(doc_b)
+        if pb and (pb.quarter != target.quarter or pb.year != target.year - 1):
+            print(f"  [주의] 전년 동기 DSD 기간이 {pb.label} — 목표 {target.label}의 전년 동기가 아님",
+                  file=sys.stderr)
+    if getattr(args, "prior_annual", None):
+        _, doc_c = _load_doc(args.prior_annual)
+        pc = P.detect_period(doc_c)
+        if pc and not (pc.is_annual and pc.year == target.year - 1):
+            print(f"  [주의] 전기 감사보고서 DSD 기간이 {pc.label} — {target.year - 1}년 연차가 아님",
+                  file=sys.stderr)
+
+    inp = ri.RollInputs(doc=doc, base=base, target=target, doc_b=doc_b, doc_c=doc_c,
+                        use_dart=not getattr(args, "no_dart", False), company=company)
+    ops, report, dreport = ri.roll_interim_ops(inp, profile)
+    rolled = splice.apply(package.contents, ops)
+    parse_contents(rolled)  # well-formedness
+
+    out_base = os.path.splitext(args.out or args.dsd)[0]
+    if not args.out:
+        out_base += "_당전기밀기"
+    out_dsd, out_xlsx = out_base + ".dsd", out_base + ".xlsx"
+    write_dsd(out_dsd, package, rolled)
+    doc2 = parse_contents(rolled)
+    with open(out_dsd, "rb") as f:
+        export_xlsx(doc2, f.read(), out_dsd, out_xlsx)
+    n_paint = 0
+    if report.painted:
+        from .import_xlsx import import_xlsx as _imp
+        _, _, imp2 = _imp(out_xlsx)
+        n_paint = rf.paint_moved(out_xlsx, doc2, report.painted, imp2.row_positions)
+    rf.write_roll_sheet(out_xlsx, report)
+    ri.write_dart_sheet(out_xlsx, dreport)
+
+    print(f"당전기 밀기 완료: {out_xlsx} (다음 분기 DSD: {out_dsd})")
+    print(f"  기간: {base.label} → {target.label}"
+          + (" / 연결" if base.consolidated else " / 별도"))
+    print(f"  원천: 전년 동기 DSD {'있음' if doc_b else '없음'} · 전기 감사보고서 DSD "
+          f"{'있음' if doc_c else '없음'} · DART "
+          f"{'생략(' + dreport.skipped_reason + ')' if dreport.skipped_reason else '조회'}")
+    if n_paint:
+        print(f"  자동 채움 값 {n_paint}칸을 파란 배경으로 표시했습니다.")
+    print(f"  자동확정 {report.count('자동확정')}건 / 확인필요 {report.count('확인필요')}건 / "
+          f"미처리 {report.count('미처리')}건 — '롤포워드' 시트에서 위에서부터 처리")
+    if dreport.rows:
+        print(f"  DART 대사: 일치 {dreport.count('일치')} · 불일치 {dreport.count('불일치')} · "
+              f"미매칭 {dreport.count('미매칭')} · 채움 {dreport.count('채움')} — 'DART대사' 시트")
+    for item in report.items:
+        if item.grade == "미처리":
+            print(f"  [미처리] {item.where}: {item.item} — {item.note}")
+    print("  당기 열은 비어 있습니다 — 결산 수치 입력 후 `dsdxlsx check`로 검산하세요.")
+    return 1 if (report.count("확인필요") or report.count("미처리")
+                 or dreport.count("불일치")) else 0
+
+
 def cmd_renumber(args) -> int:
     """주석 재번호 — 헤딩·FS 참조 열은 자동, 서술 멘션은 확인필요 목록.
     재번호 전후 C4 대사 결과 동형성 게이트를 통과해야 파일을 만든다."""
@@ -551,6 +643,21 @@ def main(argv=None) -> int:
     p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
     p.add_argument("-o", "--out", help="출력 기본 경로 (기본: <이름>_차기기초.*)")
     p.set_defaults(func=cmd_rollforward)
+
+    p = sub.add_parser(
+        "roll-interim",
+        help="분·반기 당전기 밀기 — 직전 중간보고서 DSD(골격) → 다음 분기 DSD "
+             "(당기 비움, 전기 ← 전년 동기 DSD/DART, 전기말 ← 전기 감사보고서 DSD/DART, 기간 어휘·날짜 치환)",
+    )
+    p.add_argument("dsd", help="골격: 직전 중간보고서 DSD (2Q 작업이면 1Q, 3Q면 2Q, 1Q면 전년 3Q)")
+    p.add_argument("--prior-same", metavar="DSD", help="전년 동기 DSD — 흐름표·흐름형 주석의 전기 값 원천")
+    p.add_argument("--prior-annual", metavar="DSD",
+                   help="전기 감사보고서 DSD — 3Q→1Q 해 넘김 시 전기말(재무상태) 값 원천")
+    p.add_argument("--target", help="목표 분기 1Q|2Q|3Q 또는 2026Q2 (기본: 골격 다음 분기)")
+    p.add_argument("--no-dart", action="store_true", help="OpenDART 대사·채움 생략")
+    p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
+    p.add_argument("-o", "--out", help="출력 기본 경로 (기본: <이름>_당전기밀기.*)")
+    p.set_defaults(func=cmd_roll_interim)
 
     p = sub.add_parser(
         "renumber",

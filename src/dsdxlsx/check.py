@@ -112,6 +112,10 @@ class CheckReport:
 # ── 값/라벨 유틸 ──────────────────────────────────────────────────────
 
 _NUM_RE = re.compile(r"^\d{1,3}(?:,\d{3})*(?:\.\d+)?$")
+# 기간 버킷 보조 정규식 — '당3분기'·'전 1분기'처럼 키워드 목록에 없는 숫자 접두 변형
+# (dsdfoot constants.PERIOD_*_RE 와 동일 규칙)
+_PERIOD_CUR_RE = re.compile(r"당\d?(반|분)?기|\(당\)")
+_PERIOD_PRV_RE = re.compile(r"전\d?(반|분)?기|\(전\)")
 
 
 def cell_value(text: str):
@@ -237,9 +241,9 @@ class TableView:
 
     def period_bucket(self, c: int) -> str | None:
         h = norm(self.col_header(c))
-        if any(k in h for k in _P.period_current):
+        if any(k in h for k in _P.period_current) or _PERIOD_CUR_RE.search(h):
             return "당기"
-        if any(k in h for k in _P.period_prior):
+        if any(k in h for k in _P.period_prior) or _PERIOD_PRV_RE.search(h):
             return "전기"
         m = re.search(r"제(\d+)기", h)
         if m:
