@@ -536,6 +536,46 @@ def cmd_calibrate(args) -> int:
     return 1
 
 
+def cmd_disc(args) -> int:
+    """공시사항점검표(한공회 8400) 자동 작성."""
+    import json
+    from pathlib import Path
+
+    from . import disclosure
+
+    src = args.file
+    if src.lower().endswith(".json"):
+        review = json.loads(Path(src).read_text(encoding="utf-8"))
+    else:
+        from .check import run_checks
+        from .jsonout import build_review_json
+        from .profile import resolve_profile
+
+        package = read_dsd(src)
+        doc = parse_contents(package.contents)
+        try:
+            meta = package.meta
+        except FileNotFoundError:
+            meta = None
+        profile = resolve_profile(meta, None)
+        review = build_review_json(doc, run_checks(doc, {"C1"}, profile), profile=profile, source=src)
+    out = Path(args.out) if args.out else Path(src).with_name(Path(src).stem + "_8400공시점검표.xlsx")
+    listed = {"yes": True, "no": False}.get(args.listed)
+    res = disclosure.run(review, out, form=args.form, kicpa_dir=args.kicpa_dir, listed=listed,
+                         company=args.company, period_end=args.period_end)
+    c = res["counts"]
+    print(f"양식: {'K-IFRS' if res['form'] == 'kifrs' else '일반기업회계기준'} · "
+          f"상장 {'예' if res['listed'] else '아니오'} · {'중간' if res['interim'] else '연차'}")
+    print(f"목차 판정: 해당 {c['Y']} · 해당 없음 {c['NA']} · 확인 필요 {c['확인 필요']}")
+    print(f"8400 본문: N/A {res['na_rows']}줄 · 주석번호 {res['y_rows']}줄")
+    if res["warns"]:
+        print(f"주석 누락 후보: {', '.join(res['warns'])}")
+    if res["unmatched_notes"]:
+        print("대응 없는 주석: " + ", ".join(f"{n}.{t}" for n, t in res["unmatched_notes"]))
+    print(f"저장: {res['out']}")
+    return 0
+
+
 def cmd_ties_save(args) -> int:
     """대사맵 시트의 상태 편집(확정/제외)을 profiles/<회사>/ties.json으로 저장."""
     from . import ties as ties_mod
@@ -599,6 +639,16 @@ def main(argv=None) -> int:
     p.add_argument("a")
     p.add_argument("b")
     p.set_defaults(func=cmd_verify)
+
+    p = sub.add_parser("disc", help="공시사항점검표(한공회 8400) 자동 작성 — 해당여부·주석번호")
+    p.add_argument("file", help=".dsd 또는 check --json 으로 만든 review.json")
+    p.add_argument("-o", "--out", help="저장 경로(기본: <대상>_8400공시점검표.xlsx, 있으면 _2)")
+    p.add_argument("--form", choices=["kifrs", "kgaap"], help="양식(기본: 본문에서 자동 판별)")
+    p.add_argument("--listed", choices=["yes", "no"], help="상장 여부(기본: 본문에서 자동 판별)")
+    p.add_argument("--company", help="회사명(기본: 본문에서 추출)")
+    p.add_argument("--period-end", help="결산일 YYYY-MM-DD(기본: 본문에서 추출)")
+    p.add_argument("--kicpa-dir", help="한공회 표준조서 폴더(기본: KICPA_FORMS 환경변수)")
+    p.set_defaults(func=cmd_disc)
 
     p = sub.add_parser("check", help="합계·대사·표기 정합성 검증 (.dsd 또는 export한 .xlsx)")
     p.add_argument("file")

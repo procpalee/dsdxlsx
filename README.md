@@ -122,6 +122,13 @@ uv run --no-editable dsdxlsx annotate-ai 파일.xlsx findings.json  # ② 'AI검
 #    Claude Code에서 "/dsd-review 파일.xlsx"라고 하면 ①~② 전 과정을 스킬이 수행.
 #    모든 AI 소견은 참고용(advisory) — 반영은 본문 셀 수정 후 check 재실행으로 검산.
 #    스킬 원본: skills/dsd-review/ (배포본: ~/.claude/skills/dsd-review/)
+
+# 8) 공시사항점검표(한공회 8400) 자동 작성 — 원본 양식 사본에 해당여부·주석번호를 채움
+uv run --no-editable dsdxlsx disc 파일.dsd [-o 점검표.xlsx] [--form kifrs|kgaap] [--listed yes|no]
+#    양식(K-IFRS/일반기준)·상장·중간 여부는 본문에서 자동 판별. 한공회 원본 폴더 = KICPA_FORMS 환경변수.
+#    목차 G(해당여부)·H(주석번호), 8400 본문 F(해당 없음 줄 N/A)·G(주석번호), 맨 앞 '_자동판정' 시트
+#    (항목별 판정·근거·주석 누락 후보·대응 없는 주석). '확인 필요'는 G 를 비워 사람이 고른다.
+#    판정은 주석 제목·재무상태표 잔액·주석 본문 핵심어(회계정책 주석의 일반 서술 제외)로 한다 — 규칙은 disclosure.py.
 ```
 
 xlsx를 check하면 검증 결과가 **그 파일 안에 살아있는 엑셀 수식으로** 기록된다
