@@ -617,6 +617,50 @@ def _force_utf8_io():
             stream.reconfigure(encoding="utf-8")
 
 
+def cmd_recon(args) -> int:
+    from . import recon as R
+
+    path = args.file
+    if path.lower().endswith(".xlsx"):
+        from .import_xlsx import import_xlsx
+        _, contents, _ = import_xlsx(path)        # 엑셀 편집 상태 그대로
+    else:
+        contents = read_dsd(path).contents
+    doc = parse_contents(contents)
+    split = (lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else None)
+    sheets = R.load_workpaper(args.workpaper, split(args.fs_sheets), split(args.note_sheets))
+    if not sheets:
+        print("오류: 조서에서 재무제표·주석 시트를 못 찾음 — --fs-sheets / --note-sheets 로 지정하세요",
+              file=sys.stderr)
+        return 1
+    print("조서 시트: " + ", ".join(f"{s.name}({'재무제표' if s.kind == 'fs' else '주석'})"
+                                 for s in sheets))
+    rep = R.reconcile(doc, sheets, include_prior=args.prior)
+    out = args.out or os.path.splitext(path)[0] + "_조서대사.xlsx"
+    try:
+        stats = R.write_recon_report(rep, out, path, args.workpaper)
+    except PermissionError:
+        print(f"오류: {out} 이(가) 엑셀에서 열려 있어 저장할 수 없습니다.", file=sys.stderr)
+        return 1
+    print(f"\n보고기간 {rep.period} — 대사 {stats['items']}칸 (0 칸 {rep.zero_skipped}개 생략)")
+    for w in rep.warnings:
+        print(f"  [주의] {w}")
+    for sheet, cnt in R.summary_rows(rep):
+        parts = [f"{v} {cnt[v]}" for v in R.VERDICTS if cnt[v]]
+        print(f"  {sheet:<10} " + " · ".join(parts))
+    issues = [x for x in rep.items if x.verdict in R.ISSUE_VERDICTS]
+    if issues:
+        print(f"\n확인 필요 {len(issues)}칸" + (" (앞 30칸)" if len(issues) > 30 else "") + ":")
+        for x in issues[:30]:
+            wpv = x.wp_in_unit
+            wp_txt = "-" if wpv is None else f"{wpv:,.0f}" if wpv == int(wpv) else f"{wpv:,.2f}"
+            dsd_txt = f"{x.dsd:,.0f}" if x.dsd == int(x.dsd) else f"{x.dsd:,.2f}"
+            print(f"  ({x.verdict}) [{x.sheet}] {x.label[:24]} × {x.col[:16].replace(chr(10), ' ')}"
+                  f" {x.period}: DSD {dsd_txt} / 조서 {wp_txt} {x.where}")
+    print(f"\n결과 저장: {out}")
+    return 0
+
+
 def main(argv=None) -> int:
     _force_utf8_io()
     ap = argparse.ArgumentParser(
@@ -660,6 +704,19 @@ def main(argv=None) -> int:
                    help="리뷰용 구조화 JSON 저장 경로 — AI 검토(/dsd-review) 입력")
     p.add_argument("-o", "--out", help="검증 결과 엑셀 경로 (기본: <대상>_검증.xlsx)")
     p.set_defaults(func=cmd_check)
+
+    p = sub.add_parser(
+        "recon",
+        help="DSD ↔ 조서(최종분석적검토 등) 대사 — 재무제표·주석 칸마다 조서에서 같은 값 찾기",
+    )
+    p.add_argument("file", help=".dsd 또는 export한 .xlsx")
+    p.add_argument("workpaper", help="조서 엑셀 (계산값 저장된 파일)")
+    p.add_argument("--fs-sheets", help="재무제표 시트 이름(쉼표) — 기본: BS·IS·CF·SCE·FS 등 자동")
+    p.add_argument("--note-sheets", help="주석 시트 이름(쉼표) — 기본: '주석'·FN 자동")
+    p.add_argument("--prior", action="store_true",
+                   help="조서에 기간 열이 없어도 전기 칸까지 값 찾기 (기본: 당기만)")
+    p.add_argument("-o", "--out", help="결과 엑셀 경로 (기본: <대상>_조서대사.xlsx)")
+    p.set_defaults(func=cmd_recon)
 
     p = sub.add_parser(
         "annotate-ai",
