@@ -332,6 +332,9 @@ def _copy_cols(a: TableRec, a_cols: list[int], b: TableRec, b_cols: list[int],
     return n, missing
 
 
+_HEADING_ROW_RE = re.compile(r"^\s*(?:[0-9]+|[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩⅰⅱⅲⅳⅴ]+|\([0-9가-힣]\))\s*[.)]")
+
+
 def _insert_b_only_rows(a: TableRec, b: TableRec, a_cols: list[int], b_cols: list[int],
                         rowmap: dict[int, int], ops: list) -> list[str]:
     """전년 동기 표에만 있고 값이 있는 행(예: 현금흐름표 '지분법이익')을 A 에 넣는다 - 전년 동기에서
@@ -355,6 +358,7 @@ def _insert_b_only_rows(a: TableRec, b: TableRec, a_cols: list[int], b_cols: lis
         cols_used = {a_cols[k] for k, _c in vals}
         order = [i for i in a.tv.body if i > anchor] + sorted((i for i in a.tv.body if i <= anchor), reverse=True)
         tpl = next((i for i in order if not is_total_label(a.tv.row_label(i))
+                    and not _HEADING_ROW_RE.match(a.tv.row_label(i))   # 번호 붙은 소제목('4. 영업활동…')은 본보기 아님
                     and all(a.tv.cell(i, c) is not None and (a.tv.value(i, c) is not None
                                                              or a.tv.cell(i, c).text.strip() == "")
                             for c in cols_used)
