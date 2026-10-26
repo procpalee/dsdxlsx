@@ -30,19 +30,22 @@ from .check import norm
 from .model import Document
 from .rollinterim import _CUR_MARK_RE, _PREV_MARK_RE, TableRec, _leaf, scan
 
-# 조서 시트 자동 분류 (시트 이름 정규화 후 비교)
-FS_SHEETS = {"bs", "is", "pl", "cf", "sce", "fs", "재무상태표", "손익계산서",
-             "포괄손익계산서", "현금흐름표", "자본변동표", "재무제표"}
-# DSD 재무제표 종류 → 조서 시트 이름 (같은 종류 시트가 없으면 재무제표 시트 전체)
-KIND_SHEET_RE = {"BS": re.compile(r"^bs$|재무상태표", re.I),
-                 "PL": re.compile(r"^(is|pl)$|손익계산서", re.I),
-                 "CF": re.compile(r"^cf$|현금흐름표", re.I),
-                 "SCE": re.compile(r"^sce$|자본변동표", re.I)}
-GENERIC_FS_RE = re.compile(r"^fs$|^재무제표$", re.I)
+# 조서 시트 자동 분류 — 시트 이름(정규화 · 소문자, '연결' 머리 · '(공시)/(정산)' 꼬리를 뗀 것)
+# 또는 시트 위 제목 칸이 이 이름 그대로면 재무제표 시트. 'BS합산' · 'CF조정' 같은 보조 시트는 아님.
+FS_NAME_KIND = {"bs": "BS", "재무상태표": "BS",
+                "is": "PL", "pl": "PL", "손익계산서": "PL", "포괄손익계산서": "PL",
+                "cf": "CF", "현금흐름표": "CF",
+                "sce": "SCE", "ce": "SCE", "자본변동표": "SCE",
+                "fs": "FS", "재무제표": "FS"}
+_GRADE_RE = re.compile(r"\((공시|정산)\)$")
 NOTE_SHEET_RE = re.compile(r"주석|^fn$|^notes?$", re.I)
+# 주석마다 따로 둔 시트 ('6. 현금및현금성자산', '18. 차입금 (3)')
+NOTE_EACH_RE = re.compile(r"^\s*(\d{1,2})\s*\.\s*(\S.*)$")
+_INDEX_RE = re.compile(r"index|목차|색인", re.I)
 
 _DATE_RE = re.compile(r"(20\d{2})\s*[.\-/년]\s*(\d{1,2})\s*[.\-/월]\s*(\d{1,2})")
-_3M_RE = re.compile(r"3\s*개\s*월")
+# 기간 길이 '3개월' — 만기 구간 '3개월 미만 · 3개월에서 1년'은 아님
+_3M_RE = re.compile(r"3\s*개\s*월(?!\s*(미만|이내|이하|이상|초과|에서|~|-|～))")
 _NOTE_TITLE_RE = re.compile(r"^\s*(\d{1,2})\s*\.\s*(\S.*)$")
 _PAREN_RE = re.compile(r"\(([^()]*)\)")
 _LOSS_RE = re.compile(r"손실|결손|차감|손$|감소|누계액|\(-\)")
@@ -64,8 +67,9 @@ def _canon(text: str) -> str:
     t = _DATE_RE.sub("", t)
     t = re.sub(r"당\s*(분|반)\s*기", "당기", t)
     t = re.sub(r"전\s*(분|반)\s*기", "전기", t)
-    k = D.canon(t)
+    k = D.canon(t).lower()
     k = re.sub(r"의?(증가|감소)\((증가|감소)\)$", "", k)      # 현금흐름표 '미수금의 감소(증가)'
+    k = re.sub(r"(.{2,})의(취득|처분|증가|감소|상환|지급|발행|차입|납부|수취|회수)$", r"\1", k)
     k = k.replace("으로인한", "").replace("에의한", "")
     m = _RESULT_RE.search(k)
     if m:                                               # 영업손실 = 영업이익(손실) 행
@@ -100,6 +104,11 @@ class WpRow:
     label: str
     keys: set[str]
     nums: dict[int, float]          # 열 번호 → 값
+    # 그 행에 걸린 머리글: 열 → (날짜 | None, 당기/전기 | None, 3개월 여부)
+    cols: dict[int, tuple] = field(default_factory=dict)
+    sect: str | None = None          # 표 위 소제목 '① 당기말'의 기간 (열 머리글이 기간을 안 줄 때)
+    unit: int = 1                    # 시트 위 '(단위: 천원)' 배수
+    names: dict[int, set] = field(default_factory=dict)   # 열 → 머리글 이름 키 ('연이자율' · '감가상각')
 
 
 @dataclass
@@ -107,8 +116,10 @@ class WpSheet:
     name: str
     kind: str                        # fs | note
     rows: list[WpRow] = field(default_factory=list)
-    col_date: dict[int, tuple[tuple[int, int, int], bool]] = field(default_factory=dict)
-    blocks: list[tuple[int, str, int, int]] = field(default_factory=list)  # (번호, 제목키, 시작, 끝)
+    blocks: list[tuple[int | None, str, int, int]] = field(default_factory=list)  # (번호, 제목키, 시작, 끝)
+    fs_kind: str = ""                # BS | PL | CF | SCE | FS(여러 재무제표가 한 시트)
+    grade: str = ""                  # 공시 | 정산 | ''
+    consolidated: bool = False       # 시트 이름 · 제목에 '연결'
 
 
 def _as_date(v) -> tuple[int, int, int] | None:
@@ -125,102 +136,289 @@ def _is_num(v) -> bool:
     return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
 
-def _header_dates(grid: list[list]) -> dict[int, tuple[tuple[int, int, int], bool]]:
-    """머리글(위 6행)의 날짜 → {열: (날짜, 3개월 여부)}. 날짜 없는 '3개월' 열은
-    오른쪽(없으면 왼쪽) 가장 가까운 날짜 열의 날짜를 쓴다 ('6월 누적 | 최종3개월 | 9월 누적')."""
-    dates: dict[int, tuple[int, int, int]] = {}
-    three: set[int] = set()
-    for r in grid[:6]:
-        for c, v in enumerate(r):
-            if c not in dates and (d := _as_date(v)):
-                dates[c] = d
-            if isinstance(v, str) and _3M_RE.search(v):
-                three.add(c)
-    out = {c: (d, c in three) for c, d in dates.items()}
-    for c in three:
-        if c in out:
-            continue
-        right = [x for x in sorted(dates) if x > c and x not in three]
-        left = [x for x in sorted(dates, reverse=True) if x < c and x not in three]
-        src = right[0] if right else (left[0] if left else None)
-        if src is not None:
-            out[c] = (dates[src], True)
-    return out
+# 머리글 칸의 기간 표시: '당분기말' · '제 40(당) 기' · '(전)' … ('당기순이익' 같은 계정은 _ACCT_HDR_RE 로 뺌)
+_HDR_CUR_RE = re.compile(r"\(당\)|당\d?(분|반)?기")
+_HDR_PREV_RE = re.compile(r"\(전\)|전\d?(분|반)?기")
+_CUM_RE = re.compile(r"누적|누계")
+# 표 위 소제목이 기간 하나만 말할 때 ('① 당기말', '(2) 전분기', '<당기>')
+_SECT_RE = re.compile(r"^[\[<(]?[①-⑳\d]*[).]?[\[<(]?(당|전)\d?(분|반)?기(말|초)?(현재)?[\]>)]?:?$")
+_UNIT_RE = re.compile(r"단위\s*[:：]\s*([^)\s]+)")
+_UNIT_MULT = {"원": 1, "천원": 1000, "백만원": 1_000_000, "십억원": 1_000_000_000}
 
 
-def _sheet_kind(name: str, fs: set[str] | None, notes: set[str] | None) -> str | None:
-    if fs is not None or notes is not None:
-        if fs and name in fs:
-            return "fs"
-        if notes and name in notes:
-            return "note"
+def _hdr_token(v) -> tuple | None:
+    """머리글 칸 → (날짜 | None, 당기/전기 | None, 3개월 여부, 누적 여부). 기간 말이 없으면 None."""
+    if isinstance(v, (_dt.datetime, _dt.date)):
+        return ((v.year, v.month, v.day), None, False, False)
+    if not isinstance(v, str):
         return None
-    if norm(name).lower() in FS_SHEETS:
-        return "fs"
-    if NOTE_SHEET_RE.search(norm(name)):
-        return "note"
+    s = norm(v)
+    if not s or len(s) > 30 or _ACCT_HDR_RE.search(s):
+        return None
+    d = _as_date(s)
+    p = "당기" if _HDR_CUR_RE.search(s) else "전기" if _HDR_PREV_RE.search(s) else None
+    t3, cum = bool(_3M_RE.search(s)), bool(_CUM_RE.search(s))
+    if d or p or t3 or cum:
+        return (d, p, t3, cum)
     return None
 
 
-def load_workpaper(path: str, fs_sheets: list[str] | None = None,
-                   note_sheets: list[str] | None = None) -> list[WpSheet]:
-    """조서 엑셀(계산값)을 읽어 재무제표·주석 시트만 행 단위로 색인."""
-    import warnings
-    with warnings.catch_warnings():          # 인쇄 영역·데이터 유효성 확장 경고는 대사와 무관
-        warnings.simplefilter("ignore")
-        wb = load_workbook(path, data_only=True, read_only=True)
-    fs = set(fs_sheets) if fs_sheets else None
-    notes = set(note_sheets) if note_sheets else None
-    out: list[WpSheet] = []
-    for ws in wb.worksheets:
-        kind = _sheet_kind(ws.title, fs, notes)
-        if kind is None:
-            continue
-        grid = [list(r) for r in ws.iter_rows(values_only=True)]
-        sh = WpSheet(ws.title, kind, col_date=_header_dates(grid))
-        ref_cols = {c for r in grid[:6] for c, v in enumerate(r)
-                    if isinstance(v, str) and re.fullmatch(r"주석|note|notes?", norm(v), re.I)}
-        for ri, r in enumerate(grid, start=1):
-            texts = [str(v) for v in r if isinstance(v, str) and v.strip()]
-            nums = {c: float(v) for c, v in enumerate(r) if _is_num(v) and c not in ref_cols}
-            if not nums:
+_TOTAL_NAMES = {"총계", "계", "합", "합계", "총합계"}
+
+
+_PERIOD_WORD_RE = re.compile(r"제\s*\d+\s*\(\s*(당|전)\s*\)\s*\d?\s*(분|반)?\s*기\s*(말|초)?"
+                             r"|(당|전)\s*\d?\s*(분|반)?\s*기\s*(말|초)?|누적|누계")
+
+
+def _name_keys(text: str) -> set[str]:
+    """열 머리글 → 이름 키 ('총장부금액' · '연이자율'). 기간 말 · 날짜 · 숫자는 뺀다."""
+    t = _3M_RE.sub("", _DATE_RE.sub("", _PERIOD_WORD_RE.sub("", text)))
+    keys = {k for k in label_keys([t]) if len(k) >= 2 and not k.isdigit()}
+    out = {"합계" if k in _TOTAL_NAMES else k for k in keys}
+    if any(k.endswith(("총계", "합계")) for k in out):   # '자본총계' 열 = '총 계' 열
+        out.add("합계")
+    return out
+
+
+def _names_hit(names: set[str], keys: set[str], exact: bool = False) -> bool:
+    """열 이름이 같은가 — exact 가 아니면 한쪽이 다른 쪽을 품어도 같다고 본다('기초' ↔ '기초장부금액')."""
+    if names & keys:
+        return True
+    return not exact and any(len(a) >= 2 and len(b) >= 2 and (a in b or b in a)
+                             for a in names for b in keys)
+
+
+def _named(row: "WpRow", cols, keys: set[str]) -> list[int]:
+    """열 중 이름이 같은 것 — 정확히 같은 이름이 있으면 그것만, 없으면 품는 이름."""
+    exact = [c for c in cols if _names_hit(row.names.get(c, set()), keys, True)]
+    return exact or [c for c in cols if _names_hit(row.names.get(c, set()), keys)]
+
+
+def _unit_of(texts: list[str]) -> int | None:
+    for t in texts:
+        m = _UNIT_RE.search(t)
+        if m and (u := _UNIT_MULT.get(norm(m.group(1)).split(",")[-1])):
+            return u
+    return None
+
+
+def classify_sheet(name: str, top: list[list]) -> tuple[str, str, str, bool] | None:
+    """시트 → (fs | note, 재무제표 종류, 공시/정산, 연결 여부). 대상이 아니면 None.
+    재무제표 = 시트 이름 또는 위 5행 제목 칸이 'BS' · '재무상태표(공시)' · '연결 BS' 그대로.
+    주석 = 이름에 '주석' · 'FN' 이 있거나 이름이 'N. 제목'(주석마다 시트)."""
+    n = norm(name).lower()
+    titles = [norm(str(v)).lower() for r in top[:5] for v in r if isinstance(v, str) and v.strip()]
+    cons = n.startswith("연결") or any(t.startswith("연결") for t in titles[:3])
+
+    def fs_name(t: str):
+        for part in t.split("|"):             # 제목 칸 'BS | 재무상태표(공시)'
+            base = _GRADE_RE.sub("", part)
+            base = base[2:] if base.startswith("연결") else base
+            if base in FS_NAME_KIND:
+                return FS_NAME_KIND[base]
+        return None
+
+    fk = fs_name(n) or next((k for t in titles if (k := fs_name(t))), None)
+    if fk:
+        grade = next((m.group(1) for t in [n] + titles for part in t.split("|")
+                      if (m := _GRADE_RE.search(part))), "")
+        return ("fs", fk, grade, cons)
+    if _INDEX_RE.search(n):
+        return None
+    if NOTE_SHEET_RE.search(n) or NOTE_EACH_RE.match(name):
+        return ("note", "", "", cons)
+    return None
+
+
+def _read_sheet(ws, kind: str) -> WpSheet:
+    grid = [list(r) for r in ws.iter_rows(values_only=True)]
+    sh = WpSheet(ws.title, kind)
+    each = NOTE_EACH_RE.match(ws.title) if kind == "note" else None
+    if each:                                  # 주석마다 시트 — 시트 전체가 한 구획
+        sh.blocks.append((int(each.group(1)), _canon(each.group(2)), 1, 0))
+    hdr: dict[int, tuple] = {}                # 지금 표의 머리글: 열 → (날짜, 기간, 3개월)
+    spans: list[tuple[int, int, tuple]] = []  # 병합 머리글이 덮는 열 범위 [시작, 끝)
+    names: dict[int, set] = {}                # 열 → 머리글 이름 키
+    ref_cols: set[int] = set()
+    sect: str | None = None
+    unit = 1
+    prev_hdr = False
+    for ri, r in enumerate(grid, start=1):
+        texts = [str(v) for v in r if isinstance(v, str) and v.strip()]
+        if (u := _unit_of(texts)) is not None:
+            unit = u
+        nums = {c: float(v) for c, v in enumerate(r) if _is_num(v) and c not in ref_cols}
+        if len(nums) == 1:                     # 머리글 줄 끝의 환율 · 비율 숫자 하나 ('… | 당기말 | 9.4673')
+            tc = [c for c, v in enumerate(r) if isinstance(v, str) and v.strip()]
+            if len(tc) >= 4 and any(_hdr_token(r[c]) for c in tc[1:]):
+                nums = {}
+        if not nums:
+            text_cols = [c for c, v in enumerate(r)
+                         if ((isinstance(v, str) and v.strip() and not _UNIT_RE.search(v))
+                             or isinstance(v, (_dt.datetime, _dt.date)))]
+            texts = [str(r[c]) for c in text_cols if isinstance(r[c], str)]
+            if not each:
+                hit = False
                 for t in texts:
                     m = _NOTE_TITLE_RE.match(t.replace("\xa0", " "))
                     if m and not _DATE_RE.search(t):
                         sh.blocks.append((int(m.group(1)), _canon(m.group(2)), ri, 0))
+                        sect, hdr, spans, names, prev_hdr, hit = None, {}, [], {}, False, True
                         break
+                if hit:
+                    continue
+            if len(text_cols) == 1 and text_cols[0] <= 1:      # 왼쪽 한 칸 글 = 제목 · 소제목 · 설명
+                if _SECT_RE.match(norm(texts[0]) if texts else ""):
+                    sect = "당기" if "당" in norm(texts[0])[:6] else "전기"
+                prev_hdr = False
                 continue
-            first = min(nums)
-            label_texts = [str(v) for c, v in enumerate(r) if c < first and isinstance(v, str)]
-            sh.rows.append(WpRow(ws.title, ri, " ".join(t.strip() for t in label_texts if t.strip()),
-                                 label_keys(label_texts), nums))
-        sh.blocks = [(n, k, s, (sh.blocks[i + 1][2] - 1 if i + 1 < len(sh.blocks) else len(grid)))
-                     for i, (n, k, s, _) in enumerate(sh.blocks)]
+            if not text_cols:
+                prev_hdr = False
+                continue
+            # 머리글 줄 — 앞 줄도 머리글이면 이어 붙이고, 아니면 새 표
+            if not prev_hdr:
+                hdr, spans, names, ref_cols = {}, [], {}, set()
+            for c in text_cols:
+                if isinstance(r[c], str):
+                    names[c] = names.get(c, set()) | _name_keys(r[c])
+            toks = {c: t for c, v in enumerate(r) if (t := _hdr_token(v))}
+            ref_cols |= {c for c, v in enumerate(r)
+                         if isinstance(v, str) and re.fullmatch(r"주석|note|notes?", norm(v), re.I)}
+            row_spans = []
+            for c, (d, p, t3, cum) in toks.items():
+                if d or p:
+                    hdr[c] = (d, p, t3)
+                    if p and not d:            # 병합 머리글 '당분기말' — 같은 줄 다음 글 칸 앞까지 덮음
+                        end = next((x for x in text_cols if x > c), 10 ** 6)
+                        row_spans.append((c, end, (None, p, t3)))
+            for c, (d, p, t3, cum) in toks.items():
+                if d or p:
+                    continue
+                if c in hdr:                   # 위 줄 날짜 칸 아래 '누적' · '최종3개월'
+                    hdr[c] = (hdr[c][0], hdr[c][1], t3)
+                    continue
+                # 기간 말 없는 '3개월 · 누적' 칸: 위 줄 병합 머리글('제 40(당) 기')이 덮으면 그 기간,
+                # 아니면 날짜 칸 중 오른쪽(없으면 왼쪽) 가장 가까운 것 ('6월 누적 | 최종3개월 | 9월 누적')
+                sp = next((v for s, e, v in reversed(spans) if s <= c < e), None)
+                if sp:
+                    hdr[c] = (None, sp[1], t3)
+                    continue
+                dated = [x for x in hdr if hdr[x][0] and not hdr[x][2] and x != c]
+                right = sorted(x for x in dated if x > c)
+                left = sorted((x for x in dated if x < c), reverse=True)
+                parent = right[0] if right else (left[0] if left else None)
+                if parent is not None:
+                    hdr[c] = (hdr[parent][0], hdr[parent][1], t3)
+            spans += row_spans
+            if any(hdr[c][1] or hdr[c][0] for c in toks if c in hdr):
+                sect = None                    # 열 머리글이 기간을 주면 소제목 기간은 끝
+            prev_hdr = True
+            continue
+        prev_hdr = False
+        first = min(nums)
+        label_texts = [str(v) for c, v in enumerate(r) if c < first and isinstance(v, str)]
+        cols = dict(hdr)
+        cap = max(names) + 1 if names else 10 ** 6   # 머리글 글이 있는 열까지 (표 오른쪽 점검 칸 'True' · 0 은 아님)
+        for s, e, v in spans:
+            for c in nums:
+                if s <= c < min(e, cap) and c not in cols:
+                    cols[c] = v
+        words = {v[1] for v in hdr.values() if v[1] and not v[0]}
+        if len(words) == 1 and not any(v[0] for v in hdr.values()):
+            only = words.pop()                 # '당기초 | 취득 | 지분법손익 | 당기말' — 표 전체가 한 기간
+            for c in nums:
+                if c < cap:
+                    cols.setdefault(c, (None, only, False))
+        sh.rows.append(WpRow(ws.title, ri, " ".join(t.strip() for t in label_texts if t.strip()),
+                             label_keys(label_texts), nums, cols, sect, unit, names))
+    sh.blocks = [(n, k, s, (sh.blocks[i + 1][2] - 1 if i + 1 < len(sh.blocks) else len(grid)))
+                 for i, (n, k, s, _) in enumerate(sh.blocks)]
+    if kind == "note" and not sh.blocks:     # '투자부동산주석' — 시트 이름이 곧 주석 제목
+        title = re.sub(r"주석|\(.*?\)", "", ws.title).strip()
+        sh.blocks.append((None, _canon(title), 1, len(grid)))
+    return sh
+
+
+def load_workpaper(path: str, fs_sheets: list[str] | None = None,
+                   note_sheets: list[str] | None = None, skip: list[str] | None = None,
+                   fs_map: dict[str, list[str]] | None = None) -> list[WpSheet]:
+    """조서 엑셀(계산값)을 읽어 재무제표·주석 시트만 행 단위로 색인.
+    fs_map = {'BS': ['BS(공시)'], …} 이나 fs_sheets/note_sheets 로 시트를 지정하면 그 시트만.
+    지정이 없으면 이름 · 제목으로 자동 판정하고, 같은 종류에 공시 · 정산 시트가 다 있으면 공시만."""
+    import warnings
+    with warnings.catch_warnings():          # 인쇄 영역·데이터 유효성 확장 경고는 대사와 무관
+        warnings.simplefilter("ignore")
+        wb = load_workbook(path, data_only=True, read_only=True)
+    given = bool(fs_sheets or note_sheets or fs_map)
+    fs_kind_of = {s: k for k, names in (fs_map or {}).items() for s in names}
+    fs_kind_of.update({s: "" for s in (fs_sheets or []) if s not in fs_kind_of})
+    notes = set(note_sheets or [])
+    skip_set = set(skip or [])
+    out: list[WpSheet] = []
+    for ws in wb.worksheets:
+        if ws.title in skip_set:
+            continue
+        top = [list(r) for r in ws.iter_rows(values_only=True, max_row=5)]
+        auto = classify_sheet(ws.title, top)
+        if given:
+            if ws.title in fs_kind_of:
+                kind, fk = "fs", fs_kind_of[ws.title] or (auto[1] if auto and auto[0] == "fs" else "FS")
+            elif ws.title in notes:
+                kind, fk = "note", ""
+            else:
+                continue
+            grade, cons = (auto[2], auto[3]) if auto else ("", False)
+        else:
+            if auto is None or getattr(ws, "sheet_state", "visible") != "visible":
+                continue
+            kind, fk, grade, cons = auto
+        sh = _read_sheet(ws, kind)
+        sh.fs_kind, sh.grade, sh.consolidated = fk, grade, cons
         out.append(sh)
     wb.close()
+    if not given:                             # 같은 종류에 공시 · 정산이 다 있으면 공시만
+        public = {s.fs_kind for s in out if s.kind == "fs" and s.grade == "공시"}
+        out = [s for s in out if not (s.kind == "fs" and s.grade == "정산" and s.fs_kind in public)]
     return out
+
+
+def sheet_config(sheets: list[WpSheet]) -> dict:
+    """자동 판정 결과 → 건별 설정 모양 (사람이 고쳐 쓰라고 파일로 남김)."""
+    fs: dict[str, list[str]] = {}
+    for s in sheets:
+        if s.kind == "fs":
+            fs.setdefault(s.fs_kind or "FS", []).append(s.name)
+    return {"재무제표": fs, "주석": [s.name for s in sheets if s.kind == "note"],
+            "빼는 시트": [], "빼는 칸": [], "이름 다른 행": {}}
 
 
 # ── 값 비교 ─────────────────────────────────────────────────────────
 
-def compare(v, w: float | None, unit: int, label: str) -> str | None:
-    """DSD 값 v 와 조서 값 w → '같음' | '반올림' | '부호' | None."""
+def compare(v, w: float | None, unit: int, label: str, wp_unit: int = 1) -> str | None:
+    """DSD 값 v 와 조서 값 w → '같음' | '반올림' | '부호' | None.
+    unit = DSD 표 단위, wp_unit = 조서 시트 '(단위: 천원)' 배수."""
     if w is None:
         return None
     v = float(v)
     cands = [w]
     if unit > 1:
         cands.append(w / unit)                    # 조서 원 단위, DSD 천원
+    if wp_unit != unit:
+        cands.append(w * wp_unit / unit)          # 조서 천원, DSD 원 (또는 백만원)
+    scaled = unit > 1 or wp_unit > 1
+    if unit == 1 and wp_unit == 1 and abs(v) >= 100 and w == int(w) and abs(w) >= 100_000:
+        cands.append(w / 1000)                    # DSD 표에 단위 표시가 없고 행 이름에만 '(단위: 천원)'
+        scaled = True
     for x in cands:
         if x == v:
             return "같음"
-        if v and (abs(x - v) <= (1 if unit > 1 else 0) or (v == int(v) and round(x) == v)):
+        if v and (abs(x - v) <= (1 if scaled else 0) or (v == int(v) and round(x) == v)):
             return "반올림"
     if v != int(v) or abs(v) <= 100:              # 비율: 27.27 ↔ 0.2727, 4.6 ↔ 0.046
         if w and abs(w * 100 - v) <= 0.006:
             return "같음"
     for x in cands:
-        if abs(x) == abs(v) or (unit > 1 and abs(abs(x) - abs(v)) <= 1):
+        if abs(x) == abs(v) or (scaled and abs(abs(x) - abs(v)) <= 1):
             return "부호"
     return None
 
@@ -316,7 +514,7 @@ def _cell_periods(rec: TableRec, year: int | None = None) -> dict[tuple[int, int
             elif c in prev:
                 out[(i, c)] = "전기"
             else:
-                out[(i, c)] = table_mark or row_mark or "당기"
+                out[(i, c)] = row_mark or table_mark or "당기"
     return out
 
 
@@ -332,7 +530,9 @@ def _target_date(per: P.Period | None, period: str, rec: TableRec):
 
 
 def _match_block(sheets: list[WpSheet], note_no: int | None, title: str) -> list[tuple[WpSheet, int, int]]:
-    """DSD 주석 → 조서 주석 시트 구획(들). 제목 유사도 우선, 없으면 번호."""
+    """DSD 주석 → 조서 주석 구획(들). 제목 유사도 우선, 없으면 번호.
+    주석마다 시트를 두고 한 주석을 여러 시트로 나눈 경우('18. 차입금(1),(2)' · '18. 차입금 (3)')
+    가장 비슷한 시트와 번호가 같은 시트를 함께 본다."""
     key = _canon(title)
     best, best_r = [], 0.0
     by_no = []
@@ -342,27 +542,70 @@ def _match_block(sheets: list[WpSheet], note_no: int | None, title: str) -> list
         for n, k, s, e in sh.blocks:
             r = difflib.SequenceMatcher(None, key, k).ratio() if key and k else 0.0
             if r > best_r + 1e-9:
-                best, best_r = [(sh, s, e)], r
+                best, best_r = [(sh, n, s, e)], r
             elif abs(r - best_r) < 1e-9 and r > 0:
-                best.append((sh, s, e))
+                best.append((sh, n, s, e))
             if note_no is not None and n == note_no:
                 by_no.append((sh, s, e))
     if best_r >= 0.6:
-        return best
+        nos = {n for sh, n, _s, _e in best if n is not None and NOTE_EACH_RE.match(sh.name)}
+        out = [(sh, s, e) for sh, _n, s, e in best]
+        for sh in sheets:
+            if sh.kind == "note" and NOTE_EACH_RE.match(sh.name):
+                out += [(sh, s, e) for n, _k, s, e in sh.blocks if n in nos and (sh, s, e) not in out]
+        return out
     return by_no
 
 
-def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False) -> ReconReport:
+@dataclass
+class ReconConfig:
+    """건별 설정(_engagement/dsd_recon.json 의 '별도' · '연결' 한쪽)."""
+    exclude: list[dict] = field(default_factory=list)      # [{'구획': '주석9', '행': '합계', '열': '당분기'}]
+    aliases: dict[str, str] = field(default_factory=dict)  # DSD 행 이름 → 조서 행 이름
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "ReconConfig":
+        d = d or {}
+        return cls(list(d.get("빼는 칸") or []), dict(d.get("이름 다른 행") or {}))
+
+    def excluded(self, item: "Item") -> bool:
+        for x in self.exclude:
+            if x.get("구획") and x["구획"] != item.sheet:
+                continue
+            if x.get("행") and norm(x["행"]) not in norm(item.label):
+                continue
+            if x.get("열") and norm(x["열"]) not in norm(item.col):
+                continue
+            if x.get("기간") and x["기간"] != item.period:
+                continue
+            return True
+        return False
+
+    def alias_keys(self, keys: set[str]) -> set[str]:
+        extra: set[str] = set()
+        for src, dst in self.aliases.items():
+            if label_keys([src]) & keys:
+                extra |= label_keys([dst])
+        return extra
+
+
+def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False,
+              config: ReconConfig | None = None) -> ReconReport:
     per = P.detect_period(doc)
+    cfg = config or ReconConfig()
     rep = ReconReport(period=per.label if per else "(기간 미상)")
     if per is None:
         rep.warnings.append("DSD 보고기간을 못 읽어 조서 머리글 날짜를 쓰지 않고 행 안에서만 찾음")
+    elif sheets and per.consolidated != any(s.consolidated for s in sheets):
+        rep.warnings.append("DSD 는 %s 재무제표인데 조서 시트 제목은 %s - 조서 파일을 확인"
+                            % (("연결", "별도") if per.consolidated else ("별도", "연결")))
+    one_q = bool(per and per.quarter == 1)    # 1분기는 3개월 = 누적
     fs_rows = [r for sh in sheets if sh.kind == "fs" for r in sh.rows]
     if sheets and not any(r.nums for sh in sheets for r in sh.rows):
         rep.warnings.append("조서에서 숫자를 못 읽음 — 계산값이 없는 파일이면 엑셀에서 열어 저장한 뒤 다시 실행")
-    sheet_of = {sh.name: sh for sh in sheets}
 
     recs, _ = scan(doc)
+    common_of: dict[int, set[str]] = {}
     for rec in recs:
         if rec.kind in ("OTHER", "RE"):
             continue
@@ -373,18 +616,30 @@ def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False)
                 scope += [r for r in sh.rows if s <= r.row <= e]
             ctx = f"주석{rec.sec.note_no}" if rec.sec.note_no else "주석"
         else:
-            kre = KIND_SHEET_RE.get(rec.kind)
-            mine = [sh for sh in sheets if sh.kind == "fs" and kre and kre.search(norm(sh.name))]
-            mine += [sh for sh in sheets if sh.kind == "fs" and GENERIC_FS_RE.search(norm(sh.name))]
+            mine = [sh for sh in sheets if sh.kind == "fs" and sh.fs_kind in (rec.kind, "FS")]
             scope = [r for sh in mine for r in sh.rows] if mine else fs_rows
             ctx = rec.sec.title
         periods = _cell_periods(rec, per.year if per else None)
         unit = tv.unit
+        if id(scope) not in common_of:         # 범위 안 4행 이상에 나오는 이름 키 = 흔한 키
+            freq: dict[str, int] = {}
+            for r in scope:
+                for k in r.keys:
+                    freq[k] = freq.get(k, 0) + 1
+            common_of.clear()
+            common_of[id(scope)] = {k for k, n in freq.items() if n >= 4}
+        common = common_of[id(scope)]
+        # 기간이 없는 이름 있는 열이 여럿인 표(범주별 · 변동표 · 자본 구성요소)
+        named_cols = {frozenset(k) for c in range(tv.ncols)
+                      if c not in rec.cur and c not in rec.prev and (k := _name_keys(_leaf(tv, c)))}
+        strict = len(named_cols) >= 2
+        has_cols: dict[tuple, bool] = {}          # (기간, 3개월) → 범위에 그 기간 열이 있나
         for i in tv.body:
             texts = [tv.text(i, c) for c in range(tv.ncols)
                      if tv.text(i, c).strip() and tv.value(i, c) is None]
             label = " ".join(t.strip() for t in texts)
             keys = label_keys(texts)
+            keys |= cfg.alias_keys(keys)
             own = label_keys([tv.cell(i, c).text for c in range(tv.ncols)    # 병합 칸 제외
                               if tv.cell(i, c) is not None and tv.value(i, c) is None])
             for c in range(tv.ncols):
@@ -396,13 +651,26 @@ def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False)
                 is3m = bool(_3M_RE.search(_leaf(tv, c)))
                 item = Item(ctx, tv.table.id, tv.table.rows[i].id, c, label[:40],
                             tv.col_header(c)[:30], period, float(v), None, "", unit=unit)
+                if cfg.exclude and cfg.excluded(item):
+                    item.verdict = "제외(설정)"
+                    rep.items.append(item)
+                    continue
                 if not scope:
                     if v != 0:
                         item.verdict = "조서에 없음"
                         rep.items.append(item)
                     continue
-                _judge(item, v, keys, scope, sheet_of, target, is3m, unit,
-                       include_prior or period == "당기", rec.kind, own)
+                # DSD 열 이름 — 기간이 없는 열('연이자율(%)', 변동표 '취득')은 이름으로 조서 열을 찾고,
+                # 기간 열('전기말/총장부금액')은 기간이 맞는 열 중 같은 이름 열을 먼저 본다
+                col_keys = _name_keys(_leaf(tv, c)) or None
+                neutral = c not in rec.cur and c not in rec.prev
+                hk = (period, is3m, target, frozenset(col_keys or ()), neutral)
+                if hk not in has_cols:
+                    has_cols[hk] = any(_row_cols(r, target, period, is3m, one_q, col_keys, False,
+                                                 neutral, strict)[0] for r in scope)
+                _judge(item, v, keys, scope, target, period, is3m, one_q, has_cols[hk], unit,
+                       include_prior or period == "당기", rec.kind, own, col_keys, neutral, strict,
+                       common)
                 if item.verdict == "0 생략":
                     rep.zero_skipped += 1
                     continue
@@ -410,11 +678,54 @@ def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False)
     return rep
 
 
-def _cols_for(sh: WpSheet, target, is3m: bool) -> list[int]:
-    if target is None:
-        return []
-    cols = [c for c, (d, t3) in sh.col_date.items() if d == target and t3 == is3m]
-    return sorted(cols)
+def _row_period(row: WpRow) -> str | None:
+    """행 전체의 기간 — 표 위 소제목('① 당기말') 또는 행 이름('전기초' · '당분기말')."""
+    if row.sect:
+        return row.sect
+    lab = norm(row.label)
+    return "전기" if _ROW_PREV_RE.search(lab) else "당기" if _ROW_CUR_RE.search(lab) else None
+
+
+def _row_cols(row: WpRow, target, period: str, is3m: bool, one_q: bool,
+              col_keys: set[str] | None = None, loose: bool = True,
+              neutral: bool = True, strict: bool = False) -> tuple[list[int], bool]:
+    """그 행에서 DSD 칸(기간 · 3개월)에 맞는 조서 열과, 행에 기간 정보가 있는지.
+    열 머리글의 날짜가 있으면 날짜로, 없으면 '당기 · 전기' 말로. 열이 기간을 안 주면 표 위 소제목.
+    col_keys = DSD 열 이름('연이자율(%)' · '감가상각' · '총장부금액') — 기간이 맞는 열 중 같은 이름 열을 먼저,
+    기간이 없는 DSD 열(neutral)은 조서에서 같은 이름 열을 쓴다.
+    loose = 행 기간을 모를 때도 이름 대조를 쓸지 (당기 칸 · --prior 만).
+    strict = DSD 표가 이름 있는 열 여럿(범주 · 변동 항목)이라 같은 이름 열이 없으면 다른 표로 본다."""
+
+    def narrow(cols: list[int]) -> list[int]:
+        if col_keys:
+            named = _named(row, cols, col_keys)
+            if named:
+                return named
+        return cols
+
+    # 값이 있는 열에 걸린 기간만 ('당기말 | 예금종류 | 금액' 처럼 이름 칸 위 기간 말은 표 전체 표시라 무시)
+    info = [c for c, (d, p, _t3) in row.cols.items() if (d or p) and c in row.nums]
+
+    def period_ok(c: int) -> bool:
+        d, p, t3 = row.cols[c]
+        if not one_q and t3 != is3m:
+            return False
+        return (d is not None and target is not None and d == target) or (d is None and p == period)
+
+    rp = _row_period(row)
+    if col_keys and neutral:
+        named = _named(row, list(row.nums), col_keys)
+        ok = [c for c in named if (period_ok(c) if c in info
+                                   else rp == period or (rp is None and loose))]
+        if ok:
+            return sorted(ok), True
+        if named or strict:                    # 이름 열은 있는데 기간이 다름 / 이름 열이 없는 다른 표
+            return [], True
+    if info:
+        return sorted(narrow([c for c in info if period_ok(c)])), True
+    if rp:
+        return (sorted(narrow(list(row.nums))) if rp == period else []), True
+    return [], False
 
 
 def _ref(row: WpRow, col: int) -> str:
@@ -422,14 +733,19 @@ def _ref(row: WpRow, col: int) -> str:
     return f"{row.sheet}!{get_column_letter(col + 1)}{row.row}"
 
 
-def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str, WpSheet],
-           target, is3m: bool, unit: int, search_undated: bool, kind: str = "",
-           own: set[str] | None = None) -> None:
+def _judge(item: Item, v, keys: set[str], scope: list[WpRow], target, period: str, is3m: bool,
+           one_q: bool, any_dated: bool, unit: int, search_undated: bool, kind: str = "",
+           own: set[str] | None = None, col_keys: set[str] | None = None,
+           neutral: bool = True, strict: bool = False, common: set[str] = frozenset()) -> None:
     def val_cols(row: WpRow) -> tuple[list[int], bool]:
-        cols = _cols_for(sheet_of[row.sheet], target, is3m)
-        if cols:
+        cols, info = _row_cols(row, target, period, is3m, one_q, col_keys, search_undated, neutral,
+                               strict)
+        if info:
             return cols, True
         return (sorted(row.nums), False) if search_undated else ([], False)
+
+    def val(row: WpRow, col: int) -> float | None:
+        return row.nums.get(col)
 
     def finish(verdict, how, row=None, col=None, w=None):
         item.verdict, item.how = verdict, how
@@ -448,8 +764,12 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str
     def best_rows(ks: set[str]) -> list[WpRow]:
         best: dict[str, int] = {}
         by_sheet: dict[str, list[WpRow]] = {}
+        spec = ks - common
         for row in scope:
-            n = len(ks & row.keys)
+            inter = ks & row.keys
+            if spec and not (inter & spec):    # 범위에 흔한 키('종속기업')만 겹침
+                continue
+            n = len(inter)
             if n and n >= best.get(row.sheet, 0):
                 if n > best.get(row.sheet, 0):
                     best[row.sheet], by_sheet[row.sheet] = n, []
@@ -459,24 +779,31 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str
     cands = best_rows(keys)
     if own and own != keys:
         cands += [r for r in best_rows(own) if r not in cands]
-    any_dated = any(_cols_for(sheet_of[sh], target, is3m) for sh in {r.sheet for r in scope})
+    if col_keys and len(cands) > 1:            # 같은 회사 · 계정 이름이 여러 표에 — DSD 열 이름이 있는 표
+        pref = [r for r in cands if any(_names_hit(r.names.get(c, set()), col_keys, True) for c in r.nums)]
+        pref = pref or [r for r in cands if any(_names_hit(r.names.get(c, set()), col_keys) for c in r.nums)]
+        if pref:
+            cands = pref
     for row in cands:
         cols, _ = val_cols(row)
         for col in cols:
-            k = compare(v, row.nums.get(col), unit, item.label)
+            k = compare(v, val(row, col), unit, item.label, row.unit)
             if k:
                 return finish("일치", "같은 행" + ("" if k == "같음" else f" · {k}"), row, col,
-                              row.nums.get(col))
+                              val(row, col))
 
-    if not any_dated and not search_undated:
-        item.verdict = "대사 대상 아님"
-        return
+    if not search_undated:
+        # 같은 이름 행이 있으면 그 행들에, 없으면 범위 전체에 그 기간 열이 있는지 (연결 주석 시트는 당기만)
+        dated = any(val_cols(r)[0] for r in cands) if cands else any_dated
+        if not dated:
+            item.verdict = "대사 대상 아님"
+            return
 
     if v == 0:
         item.verdict = "0 생략"
         for row in cands:
             cols, dated = val_cols(row)
-            w = next((row.nums[c] for c in cols if c in row.nums), None) if dated else None
+            w = next((val(row, c) for c in cols if c in row.nums), None) if dated else None
             if w:
                 return finish("불일치", "같은 행", row, cols[0], w)
         return
@@ -486,10 +813,10 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str
         tot, used = 0.0, []
         for row in cands:
             cols, dated = val_cols(row)
-            if dated and cols[0] in row.nums:
-                tot += row.nums[cols[0]]
+            if dated and cols and cols[0] in row.nums:
+                tot += val(row, cols[0])
                 used.append(row)
-        if len(used) > 1 and (k := compare(v, tot, unit, item.label)):
+        if len(used) > 1 and (k := compare(v, tot, unit, item.label, used[0].unit)):
             return finish("일치", f"하위 합 {len(used)}행" + ("" if k == "같음" else f" · {k}"),
                           used[0], None, tot)
 
@@ -499,7 +826,7 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str
         cols, _ = val_cols(row)
         for c in cols:
             if c in row.nums:
-                w = row.nums[c]
+                w = val(row, c)
                 gap = min(abs(w - float(v)), abs(w / unit - float(v)) if unit > 1 else abs(w - float(v)))
                 near.append((gap, row, c, w))
     if near:
@@ -511,10 +838,11 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str
             continue
         cols, _ = val_cols(row)
         for col in cols:
-            k = compare(v, row.nums.get(col), unit, item.label)
-            if k in ("같음", "반올림"):
+            k = compare(v, val(row, col), unit, item.label, row.unit)
+            if k in ("같음", "반올림") or (k == "부호" and kind in ("CF", "SCE")
+                                         and _CF_DIR_RE.search(norm(item.label))):
                 return finish("일치", "다른 행" + ("" if k == "같음" else f" · {k}"), row, col,
-                              row.nums.get(col))
+                              val(row, col))
 
     if cands:
         return finish("상대 없음", "조서 칸 빈칸", cands[0])
@@ -523,7 +851,7 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], sheet_of: dict[str
 
 # ── 결과 엑셀 ───────────────────────────────────────────────────────
 
-VERDICTS = ["일치", "불일치", "부호 다름", "상대 없음", "조서에 없음", "대사 대상 아님"]
+VERDICTS = ["일치", "불일치", "부호 다름", "상대 없음", "조서에 없음", "대사 대상 아님", "제외(설정)"]
 ISSUE_VERDICTS = ("불일치", "부호 다름", "상대 없음")
 
 

@@ -618,6 +618,9 @@ def _force_utf8_io():
 
 
 def cmd_recon(args) -> int:
+    import json
+
+    from . import period as P
     from . import recon as R
 
     path = args.file
@@ -627,22 +630,41 @@ def cmd_recon(args) -> int:
     else:
         contents = read_dsd(path).contents
     doc = parse_contents(contents)
+    per = P.detect_period(doc)
+    side = "연결" if per and per.consolidated else "별도"
+    # 건별 설정(_engagement/dsd_recon.json) — {'별도': {...}, '연결': {...}}. 없으면 자동 판정 결과를 써 줌
+    conf_all: dict = {}
+    if args.config and os.path.exists(args.config):
+        with open(args.config, encoding="utf-8") as f:
+            conf_all = json.load(f)
+    conf = conf_all.get(side) or {}
     split = (lambda s: [x.strip() for x in s.split(",") if x.strip()] if s else None)
-    sheets = R.load_workpaper(args.workpaper, split(args.fs_sheets), split(args.note_sheets))
+    fs_map = None if args.fs_sheets or args.note_sheets else (conf.get("재무제표") or None)
+    notes = split(args.note_sheets) or (None if args.fs_sheets else conf.get("주석"))
+    sheets = R.load_workpaper(args.workpaper, split(args.fs_sheets), notes,
+                              skip=conf.get("빼는 시트"), fs_map=fs_map)
     if not sheets:
         print("오류: 조서에서 재무제표·주석 시트를 못 찾음 — --fs-sheets / --note-sheets 로 지정하세요",
               file=sys.stderr)
         return 1
-    print("조서 시트: " + ", ".join(f"{s.name}({'재무제표' if s.kind == 'fs' else '주석'})"
-                                 for s in sheets))
-    rep = R.reconcile(doc, sheets, include_prior=args.prior)
+    wrote = False
+    if args.config and not conf:
+        auto = R.sheet_config(sheets)
+        conf_all[side] = auto
+        os.makedirs(os.path.dirname(os.path.abspath(args.config)), exist_ok=True)
+        with open(args.config, "w", encoding="utf-8") as f:
+            json.dump(conf_all, f, ensure_ascii=False, indent=2)
+        wrote = True
+    print("조서 시트: " + ", ".join(
+        f"{s.name}({(s.fs_kind or '재무제표') if s.kind == 'fs' else '주석'})" for s in sheets))
+    rep = R.reconcile(doc, sheets, include_prior=args.prior, config=R.ReconConfig.from_dict(conf))
     out = args.out or os.path.splitext(path)[0] + "_조서대사.xlsx"
     try:
         stats = R.write_recon_report(rep, out, path, args.workpaper)
     except PermissionError:
         print(f"오류: {out} 이(가) 엑셀에서 열려 있어 저장할 수 없습니다.", file=sys.stderr)
         return 1
-    print(f"\n보고기간 {rep.period} — 대사 {stats['items']}칸 (0 칸 {rep.zero_skipped}개 생략)")
+    print(f"\n보고기간 {rep.period}({side}) — 대사 {stats['items']}칸 (0 칸 {rep.zero_skipped}개 생략)")
     for w in rep.warnings:
         print(f"  [주의] {w}")
     for sheet, cnt in R.summary_rows(rep):
@@ -657,7 +679,16 @@ def cmd_recon(args) -> int:
             dsd_txt = f"{x.dsd:,.0f}" if x.dsd == int(x.dsd) else f"{x.dsd:,.2f}"
             print(f"  ({x.verdict}) [{x.sheet}] {x.label[:24]} × {x.col[:16].replace(chr(10), ' ')}"
                   f" {x.period}: DSD {dsd_txt} / 조서 {wp_txt} {x.where}")
+    if wrote:
+        print(f"\n건별 설정 저장({side}): {args.config} - 시트 지정 · 빼는 칸 · 이름 다른 행을 고쳐 쓰세요")
     print(f"\n결과 저장: {out}")
+    if args.json_out:
+        with open(args.json_out, "w", encoding="utf-8") as f:
+            json.dump({"out": os.path.abspath(out), "period": rep.period, "side": side,
+                       "items": stats["items"], "issues": stats["issues"],
+                       "counts": {v: rep.count(v) for v in R.VERDICTS},
+                       "warnings": rep.warnings, "config_written": wrote,
+                       "sheets": [s.name for s in sheets]}, f, ensure_ascii=False, indent=2)
     return 0
 
 
@@ -711,10 +742,14 @@ def main(argv=None) -> int:
     )
     p.add_argument("file", help=".dsd 또는 export한 .xlsx")
     p.add_argument("workpaper", help="조서 엑셀 (계산값 저장된 파일)")
-    p.add_argument("--fs-sheets", help="재무제표 시트 이름(쉼표) — 기본: BS·IS·CF·SCE·FS 등 자동")
-    p.add_argument("--note-sheets", help="주석 시트 이름(쉼표) — 기본: '주석'·FN 자동")
+    p.add_argument("--fs-sheets", help="재무제표 시트 이름(쉼표) — 기본: BS · IS · CF · SCE · CE · FS(공시 · 정산 꼬리) 자동")
+    p.add_argument("--note-sheets", help="주석 시트 이름(쉼표) — 기본: '주석' · FN · 'N. 제목' 시트 자동")
     p.add_argument("--prior", action="store_true",
                    help="조서에 기간 열이 없어도 전기 칸까지 값 찾기 (기본: 당기만)")
+    p.add_argument("--config",
+                   help="건별 설정 JSON(시트 지정 · 빼는 칸 · 이름 다른 행, '별도' · '연결' 구역) - "
+                        "없으면 자동 판정 결과를 이 파일로 써 줌")
+    p.add_argument("--json", dest="json_out", help="요약 JSON 저장 경로 (xlaudit 리본이 읽음)")
     p.add_argument("-o", "--out", help="결과 엑셀 경로 (기본: <대상>_조서대사.xlsx)")
     p.set_defaults(func=cmd_recon)
 
