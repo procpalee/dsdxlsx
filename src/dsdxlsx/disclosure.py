@@ -26,8 +26,8 @@ import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_KICPA = (r"C:\Users\PC\Desktop\Business\FY2026\01. Audit\00. 참고자료\01. 한공회 표준조서"
-                 r"\2026 감사조서서식(예시)-엑셀 260827")
+# 한공회 감사조서서식(예시) 엑셀을 푼 폴더 - --kicpa-dir 또는 환경변수 KICPA_FORMS 로 지정
+DEFAULT_KICPA = ""
 FORM_FILES = {
     "kifrs": r"1. K-IFRS_2026\감사조서서식_8400_공시사항점검표_KIFRS용_2026.xlsx",
     "kgaap": r"2. 일반기업회계기준_2026\감사조서서식_8400_공시사항점검표_일반기준용_2026.xlsx",
@@ -392,7 +392,10 @@ def roll_up(items: list[Item]) -> None:
 # ── 양식 읽기·쓰기 ──────────────────────────────────────────────────────────
 
 def form_path(form: str, kicpa_dir: str | None = None) -> Path:
-    base = Path(kicpa_dir or os.getenv("KICPA_FORMS") or DEFAULT_KICPA)
+    folder = kicpa_dir or os.getenv("KICPA_FORMS") or DEFAULT_KICPA
+    if not folder:
+        raise FileNotFoundError("한공회 감사조서서식 폴더를 지정하세요 (--kicpa-dir 또는 환경변수 KICPA_FORMS)")
+    base = Path(folder)
     p = base / FORM_FILES[form]
     if not p.exists():
         raise FileNotFoundError(f"한공회 8400 원본이 없습니다: {p} (KICPA_FORMS 환경변수로 폴더 지정)")

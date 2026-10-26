@@ -3,6 +3,7 @@ name = "dsdxlsx"
 version = "0.1.0"
 description = "DART DSD ↔ XLSX 왕복 변환 도구 — 원본 XML 바이트 보존 방식"
 requires-python = ">=3.11"
+license = { text = "MIT" }
 dependencies = ["openpyxl>=3.1"]
 
 [project.scripts]

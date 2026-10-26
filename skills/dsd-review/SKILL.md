@@ -12,8 +12,7 @@ description: DART DSD/정산표(xlsx)의 AI 검토 — 오타·띄어쓰기, 주
 
 ## 전제
 
-- 도구 위치(`DSDXLSX_HOME`, 환경이 다르면 조정):
-  `C:\Users\PC\Desktop\02. Projects\01. Playground\01. 실무 AX 프로젝트\04. 업무도구\01. DSD-XLSX 변환 자동화`
+- 도구 위치: dsdxlsx 저장소 폴더(환경변수 `DSDXLSX_HOME`) 또는 `uv tool install` 로 설치한 `dsdxlsx` 명령
 - 대상은 **dsdxlsx export로 만든 .xlsx** 권장(시트 기록 가능). `.dsd`가 오면 먼저
   `export`를 실행하거나, 기록 없이 콘솔 보고만 할지 사용자에게 확인.
 - 고객 실데이터: 산출물(review.json·findings.json)은 스크래치패드에만 두고 repo에 넣지 않는다.
