@@ -692,6 +692,56 @@ def cmd_recon(args) -> int:
     return 0
 
 
+def _recon_inputs(args, doc):
+    """recon · fill 공통: 건별 설정(구역 '별도' · '연결')과 조서 시트."""
+    import json
+
+    from . import period as P
+    from . import recon as R
+
+    per = P.detect_period(doc)
+    side = "연결" if per and per.consolidated else "별도"
+    conf_all: dict = {}
+    if getattr(args, "config", None) and os.path.exists(args.config):
+        with open(args.config, encoding="utf-8") as f:
+            conf_all = json.load(f)
+    conf = conf_all.get(side) or {}
+    sheets = R.load_workpaper(args.workpaper, None, conf.get("주석"), skip=conf.get("빼는 시트"),
+                              fs_map=conf.get("재무제표") or None)
+    return side, conf, sheets
+
+
+def cmd_fill(args) -> int:
+    from . import fill as F
+    from . import splice
+    from . import recon as R
+
+    package = read_dsd(args.file)
+    doc = parse_contents(package.contents)
+    side, conf, sheets = _recon_inputs(args, doc)
+    if not sheets:
+        print("오류: 조서에서 재무제표 · 주석 시트를 못 찾음 - recon --config 설정을 확인하세요", file=sys.stderr)
+        return 1
+    ops, rep = F.fill_ops(doc, sheets, R.ReconConfig.from_dict(conf), keep_filled=args.keep_filled)
+    out = args.out or os.path.splitext(args.file)[0] + "_채움.dsd"
+    filled = splice.apply(package.contents, ops)
+    parse_contents(filled)                       # well-formedness
+    write_dsd(out, package, filled)
+    report = args.report or os.path.splitext(out)[0] + "_채움결과.xlsx"
+    try:
+        F.write_fill_report(rep, report, args.file, args.workpaper)
+    except PermissionError:
+        report = "(결과 엑셀이 열려 있어 저장 못 함)"
+    print(f"보고기간 {rep.period}({side}) - 채움 {rep.count('채움')}칸 · 못 채움 {rep.count('못 채움')}칸")
+    for w in rep.warnings:
+        print(f"  [주의] {w}")
+    for x in [x for x in rep.items if x.verdict == "못 채움"][:30]:
+        print(f"  (못 채움) [{x.sheet}] {x.label[:24]} × {x.col[:16]}: {x.how}")
+    print(f"\nDSD 저장: {out}\n결과: {report}")
+    print("다음: dsdxlsx recon 으로 대사 · dsdxlsx check 로 합계 검산")
+    return 0
+
+
 def main(argv=None) -> int:
     _force_utf8_io()
     ap = argparse.ArgumentParser(
@@ -752,6 +802,18 @@ def main(argv=None) -> int:
     p.add_argument("--json", dest="json_out", help="요약 JSON 저장 경로 (xlaudit 리본이 읽음)")
     p.add_argument("-o", "--out", help="결과 엑셀 경로 (기본: <대상>_조서대사.xlsx)")
     p.set_defaults(func=cmd_recon)
+
+    p = sub.add_parser(
+        "fill",
+        help="DSD 당기 칸 채우기 - roll-interim 으로 민 DSD 의 빈 당기 칸을 조서(8110 · 정산표)에서 (recon 짝짓기를 거꾸로)",
+    )
+    p.add_argument("file", help="당전기를 민 .dsd (당기 칸이 빈 골격)")
+    p.add_argument("workpaper", help="조서 엑셀 (계산값 저장된 파일)")
+    p.add_argument("--config", help="건별 설정 JSON(recon 과 같은 파일 - 시트 지정 · 빼는 칸 · 이름 다른 행)")
+    p.add_argument("--keep-filled", action="store_true", help="값이 있는 당기 칸은 그대로 두고 빈 칸만 (기본: 덮어씀)")
+    p.add_argument("--report", help="결과 엑셀 경로 (기본: <출력>_채움결과.xlsx)")
+    p.add_argument("-o", "--out", help="출력 .dsd (기본: <대상>_채움.dsd)")
+    p.set_defaults(func=cmd_fill)
 
     p = sub.add_parser(
         "annotate-ai",

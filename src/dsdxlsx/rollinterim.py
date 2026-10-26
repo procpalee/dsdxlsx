@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from . import dart_client as D
 from . import period as P
 from . import splice
-from .check import TableView, cell_value, norm, use_profile
+from .check import TableView, cell_value, is_total_label, norm, use_profile
 from .export_xlsx import STATEMENT_KEYWORDS, Sec, refined_sections
 from .model import Document, Node
 from .numbers import classify, to_dsd_text
@@ -38,6 +38,9 @@ KIND_OF_TITLE = {"재무상태표": "BS", "손익계산서": "PL", "포괄손익
                  "자본변동표": "SCE", "현금흐름표": "CF",
                  "이익잉여금처분계산서": "RE", "결손금처리계산서": "RE"}
 _BALANCE_HDR_RE = re.compile(r"전기말|전\)기말|\(전\)기$|제\d+\(전\)기$")
+# 캡션 '전기' 표 = 연간(직전 사업연도 - 분 · 반기 보고서는 전년 동기를 '전분기 · 전반기'로 따로 씀)
+_ANNUAL_MARK_RE = re.compile(r"[<(\[]?전\s*기[>)\]]?")
+_ACCT_COL_RE = re.compile(r"당기순|당기손익|전기순|전기손익|전기오류")
 _CUR_MARK_RE = re.compile(r"당\s*\d?\s*(분|반)?\s*기\s*말?\s*$")
 _PREV_MARK_RE = re.compile(r"전\s*\d?\s*(분|반)?\s*기\s*말?\s*$")
 _BAL_MARK_RE = re.compile(r"전\s*기\s*말\s*$")
@@ -105,7 +108,8 @@ class TableRec:
             return False
         if self.prev:
             h = norm(self.tv.col_header(self.prev[0]))
-            return bool(_BALANCE_HDR_RE.search(h))
+            # '전기'만 쓴 열 = 직전 사업연도(분 · 반기 보고서는 전년 동기를 '전분기 · 전반기'로 씀)
+            return bool(_BALANCE_HDR_RE.search(h)) or h.split("/")[-1] in ("전기", "전기(주1)")
         if self.caption:
             return bool(_BAL_MARK_RE.search(norm(self.caption)))
         return False
@@ -136,11 +140,18 @@ def scan(doc: Document) -> tuple[list[TableRec], list[Sec]]:
                 continue
             t = block.item
             tv = TableView(t, label, sec_title=sec.title)
-            cur = [c for c in range(tv.ncols) if tv.period_bucket(c) == "당기"]
-            prev = [c for c in range(tv.ncols) if tv.period_bucket(c) == "전기"]
+            # 기간 열: 0열(이름 열 - 왼쪽 위 '전기' · '당분기말'은 표 전체 기간)과
+            # 계정 이름 머리글('당기순손익' · '당기손익')은 빼고
+            cur = [c for c in range(1, tv.ncols) if tv.period_bucket(c) == "당기"
+                   and not _ACCT_COL_RE.search(norm(tv.col_header(c)))]
+            prev = [c for c in range(1, tv.ncols) if tv.period_bucket(c) == "전기"
+                    and not _ACCT_COL_RE.search(norm(tv.col_header(c)))]
             caption = ""
-            if not cur and not prev and (_CUR_MARK_RE.search(last_mark)
-                                         or _PREV_MARK_RE.search(last_mark)):
+            top_left = norm(tv.col_header(0)) if tv.ncols else ""
+            if not cur and not prev and (_CUR_MARK_RE.search(top_left) or _PREV_MARK_RE.search(top_left)):
+                caption = top_left                 # '전기 | 자산총액 | 부채총액 …' 표
+            elif not cur and not prev and (_CUR_MARK_RE.search(last_mark)
+                                           or _PREV_MARK_RE.search(last_mark)):
                 caption = last_mark
             recs.append(TableRec(sec, tv, kind, cur, prev, caption, doc.data))
             if tv.n > 2:
@@ -204,6 +215,11 @@ def match_notes(a_recs: list[TableRec], b_recs: list[TableRec]) -> dict[int, Tab
                 pool = [b for b in cands if b.caption_is_cur] or cands
             for b in pool:
                 score = 0.0
+                if a.caption and b.tv.ncols > 1 and a.tv.ncols > 1:
+                    ha = {D.norm_label(a.tv.col_header(c)) for c in range(1, a.tv.ncols)}
+                    hb = {D.norm_label(b.tv.col_header(c)) for c in range(1, b.tv.ncols)}
+                    if len(ha & hb) * 2 < len(ha | hb):
+                        continue                   # 캡션 표는 열 머리글(0열 빼고)이 절반 이상 같아야
                 if b.tv.ncols == a.tv.ncols:
                     score += 1.0
                 if _sig(b.tv) == _sig(a.tv):
@@ -228,12 +244,14 @@ def match_statement(a: TableRec, b_recs: list[TableRec]) -> TableRec | None:
 
 def _row_map(a_tv: TableView, b_tv: TableView) -> dict[int, int]:
     """A 행 → B 행 (정규화 라벨, 같은 라벨은 순서대로). 값 없는 구획 행도 포함."""
+    def key(label: str) -> str:                    # '지급임차료(주석9,12)' ↔ '지급임차료'
+        return D.canon(re.sub(r"\(\s*주석[^)]*\)", "", label))
     pool: dict[str, list[int]] = {}
     for j in b_tv.body:
-        pool.setdefault(D.canon(b_tv.row_label(j)), []).append(j)
+        pool.setdefault(key(b_tv.row_label(j)), []).append(j)
     out: dict[int, int] = {}
     for i in a_tv.body:
-        k = D.canon(a_tv.row_label(i))
+        k = key(a_tv.row_label(i))
         if not k:
             continue
         lst = pool.get(k)
@@ -312,6 +330,55 @@ def _copy_cols(a: TableRec, a_cols: list[int], b: TableRec, b_cols: list[int],
                 painted_cells.append((a.table.rows[i].start, ac))
                 n += 1
     return n, missing
+
+
+def _insert_b_only_rows(a: TableRec, b: TableRec, a_cols: list[int], b_cols: list[int],
+                        rowmap: dict[int, int], ops: list) -> list[str]:
+    """전년 동기 표에만 있고 값이 있는 행(예: 현금흐름표 '지분법이익')을 A 에 넣는다 - 전년 동기에서
+    바로 위에 있던 행 다음에, 같은 열(세부 · 소계)을 쓰는 가까운 A 행을 복제해 이름 · 전기 값만 바꿈."""
+    inv = {j: i for i, j in rowmap.items()}
+    out: list[str] = []
+    for j in b.tv.body:
+        if j in inv:
+            continue
+        lab_cell = b.tv.cell(j, 0)
+        if lab_cell is None or not lab_cell.text.strip():
+            continue
+        vals = [(k, b.tv.cell(j, bc)) for k, bc in enumerate(b_cols)
+                if b.tv.cell(j, bc) is not None and b.tv.value(j, bc) not in (None, 0)]
+        if not vals:
+            continue                               # 전년 동기에도 값이 없는 행은 넣지 않음
+        ups = [jj for jj in b.tv.body if jj < j and jj in inv]
+        if not ups:
+            continue
+        anchor = inv[ups[-1]]
+        cols_used = {a_cols[k] for k, _c in vals}
+        order = [i for i in a.tv.body if i > anchor] + sorted((i for i in a.tv.body if i <= anchor), reverse=True)
+        tpl = next((i for i in order if not is_total_label(a.tv.row_label(i))
+                    and all(a.tv.cell(i, c) is not None and (a.tv.value(i, c) is not None
+                                                             or a.tv.cell(i, c).text.strip() == "")
+                            for c in cols_used)
+                    and any(a.tv.value(i, c) is not None for c in cols_used)), None)
+        if tpl is None:
+            continue
+        trow = a.table.rows[tpl]
+
+        def idx(c, _row=trow, _i=tpl):
+            cell = a.tv.cell(_i, c)
+            return next((k for k, x in enumerate(_row.cells) if x is cell), None)
+        new_texts: dict[int, str] = {}
+        if (k := idx(0)) is not None:
+            new_texts[k] = lab_cell.text
+        for c in range(1, a.tv.ncols):
+            k = idx(c)
+            if k is not None and (a.tv.value(tpl, c) is not None or a.tv.cell(tpl, c).text.strip() == "-"):
+                new_texts[k] = ""
+        for kk, bcell in vals:
+            if (k := idx(a_cols[kk])) is not None:
+                new_texts[k] = bcell.text
+        ops.append(splice.insert_after_row(a.table.rows[anchor], splice.clone_row(a.data, trow, new_texts)))
+        out.append(lab_cell.text.strip())
+    return out
 
 
 # ── DART ─────────────────────────────────────────────────────────────
@@ -719,6 +786,9 @@ def roll_interim_ops(inp: RollInputs, profile=None
                                         painted_cells)
                 roll.add("자동확정", rec.where,
                          f"{t.id} 당기 {n_cur}칸 비움, 전기 {n}칸 ← 전년 동기 DSD 당기 열")
+                for lab in _insert_b_only_rows(rec, b, prev_cols, b_cur, rowmap, ops):
+                    roll.add("자동확정", rec.where,
+                             f"{t.id} 전년 동기에만 있는 행 '{lab[:20]}' 넣음(전기 값, 당기 칸은 비움)")
                 for i in missing:
                     roll.add("확인필요", rec.where,
                              f"{t.id} '{rec.tv.row_label(i)[:20]}' 전년 동기 표에 없는 행 — 전기 비움")
@@ -1020,9 +1090,10 @@ def _roll_caption_table(rec: TableRec, recs: list[TableRec], note_map_b, note_ma
         n = _clear_all_numeric(rec, ops, touched)
         roll.add("자동확정", rec.where, f"{t.id} 당기 표('{rec.caption[:12]}') 값 {n}칸 비움")
         return
-    if _BAL_MARK_RE.search(cap):
+    if _BAL_MARK_RE.search(cap) or _ANNUAL_MARK_RE.fullmatch(cap):
+        # '전기말' · '전기'(연간 - 요약재무정보 등)는 같은 해 전환에서 그대로, 해 넘김은 전기 감사보고서
         if same_year:
-            roll.add("자동확정", rec.where, f"{t.id} 전기말 표('{rec.caption[:12]}') 유지")
+            roll.add("자동확정", rec.where, f"{t.id} 전기(말) 표('{rec.caption[:12]}') 유지")
             return
         src, src_name, present = note_map_c.get(id(rec)), "전기 감사보고서 DSD", bool(note_map_c) or c_present
     else:

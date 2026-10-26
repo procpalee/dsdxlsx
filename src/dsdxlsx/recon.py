@@ -77,8 +77,19 @@ def _canon(text: str) -> str:
     return k
 
 
+# 같은 줄의 다른 이름 - DSD 표준 문구(K-GAAP 현금흐름표 소제목 등) ↔ 조서 · 정산표의 짧은 이름. 키(정규화) → 덧붙일 키
+LABEL_ALIAS = {
+    "현금의유출이없는비용등의가산": "비용가산", "현금유출이없는비용등의가산": "비용가산",
+    "현금의유입이없는수익등의차감": "수익차감", "현금유입이없는수익등의차감": "수익차감",
+    "영업활동자산부채의변동": "자산부채변동", "영업활동자산부채변동": "자산부채변동",
+    "기초의현금": "기초현금현금성자산", "기말의현금": "기말현금현금성자산",
+    "기초현금": "기초현금현금성자산", "기말현금": "기말현금현금성자산",
+    "미처리결손금": "미처분이익잉여금", "이익잉여금(결손금)": "이익잉여금",
+}
+
+
 def label_keys(texts: list[str]) -> set[str]:
-    """행의 글자 칸들 → 비교 키 집합: 전체 · 괄호 밖 · 괄호 안 각각의 정규화."""
+    """행의 글자 칸들 → 비교 키 집합: 전체 · 괄호 밖 · 괄호 안 각각의 정규화(+ 같은 줄 다른 이름)."""
     keys: set[str] = set()
     for raw in texts:
         s = raw.replace("\xa0", " ").replace("　", " ").strip()
@@ -92,6 +103,7 @@ def label_keys(texts: list[str]) -> set[str]:
             k = _canon(p)
             if k and k not in ("주", "유", "재", "사", "합") and not k.isdigit():
                 keys.add(k)
+    keys |= {LABEL_ALIAS[k] for k in keys if k in LABEL_ALIAS}
     return keys
 
 
@@ -156,6 +168,8 @@ def _hdr_token(v) -> tuple | None:
     if not s or len(s) > 30 or _ACCT_HDR_RE.search(s):
         return None
     d = _as_date(s)
+    if d is None and (m := re.fullmatch(r"(?:fy)?(20\d{2})년?(?:도)?", s, re.I)):
+        d = (int(m.group(1)), 0, 0)              # 연도만 - 그 해 날짜 아무것과 맞음
     p = "당기" if _HDR_CUR_RE.search(s) else "전기" if _HDR_PREV_RE.search(s) else None
     t3, cum = bool(_3M_RE.search(s)), bool(_CUM_RE.search(s))
     if d or p or t3 or cum:
@@ -170,28 +184,49 @@ _PERIOD_WORD_RE = re.compile(r"제\s*\d+\s*\(\s*(당|전)\s*\)\s*\d?\s*(분|반)
                              r"|(당|전)\s*\d?\s*(분|반)?\s*기\s*(말|초)?|누적|누계")
 
 
-def _name_keys(text: str) -> set[str]:
+def _name_keys(text: str, marks: bool = True) -> set[str]:
     """열 머리글 → 이름 키 ('총장부금액' · '연이자율'). 기간 말 · 날짜 · 숫자는 뺀다."""
     t = _3M_RE.sub("", _DATE_RE.sub("", _PERIOD_WORD_RE.sub("", text)))
     keys = {k for k in label_keys([t]) if len(k) >= 2 and not k.isdigit()}
     out = {"합계" if k in _TOTAL_NAMES else k for k in keys}
+    n = norm(text)
+    if not marks:
+        return out
+    if re.search(r"기초|기\)?초$", n):                # '당기초' · '전기초' · '기초' - 변동표 첫 열
+        out.add("기초")
+    if re.search(r"기말|기\)?말$|분기말$|반기말$", n):     # '당분기말' · '전기말' · '기말'
+        out.add("기말")
     if any(k.endswith(("총계", "합계")) for k in out):   # '자본총계' 열 = '총 계' 열
         out.add("합계")
     return out
 
 
+def _plain(keys: set[str]) -> set[str]:
+    return {k.lstrip("^") for k in keys}
+
+
+def _leafk(keys: set[str]) -> set[str]:
+    return {k for k in keys if not k.startswith("^")}
+
+
 def _names_hit(names: set[str], keys: set[str], exact: bool = False) -> bool:
-    """열 이름이 같은가 — exact 가 아니면 한쪽이 다른 쪽을 품어도 같다고 본다('기초' ↔ '기초장부금액')."""
-    if names & keys:
+    """열 이름이 같은가 — exact 가 아니면 한쪽이 다른 쪽을 품어도 같다고 본다('기초' ↔ '기초장부금액').
+    keys 의 '^' 머리 키(위 층 머리글 '매출 등')는 정확히 같을 때만."""
+    if names & _plain(keys):
         return True
     return not exact and any(len(a) >= 2 and len(b) >= 2 and (a in b or b in a)
-                             for a in names for b in keys)
+                             for a in names for b in _leafk(keys))
 
 
 def _named(row: "WpRow", cols, keys: set[str]) -> list[int]:
-    """열 중 이름이 같은 것 — 정확히 같은 이름이 있으면 그것만, 없으면 품는 이름."""
-    exact = [c for c in cols if _names_hit(row.names.get(c, set()), keys, True)]
-    return exact or [c for c in cols if _names_hit(row.names.get(c, set()), keys)]
+    """열 중 이름이 같은 것 — 정확히 같은 이름 키가 가장 많이 겹치는 열('매출 등/기타' ↔ '매입 등/기타'),
+    없으면 품는 이름."""
+    leaf, up = _leafk(keys), _plain(keys) - _leafk(keys)
+    scored = [(2 * len(row.names.get(c, set()) & leaf) + len(row.names.get(c, set()) & up), c) for c in cols]
+    best = max((sc for sc, _c in scored), default=0)
+    if best >= 2:                              # 잎 이름이 하나는 맞아야(위 층 '채무'만 맞는 열은 아님)
+        return [c for sc, c in scored if sc == best]
+    return [c for c in cols if _names_hit(row.names.get(c, set()), _leafk(keys))]
 
 
 def _unit_of(texts: list[str]) -> int | None:
@@ -230,6 +265,17 @@ def classify_sheet(name: str, top: list[list]) -> tuple[str, str, str, bool] | N
     return None
 
 
+def _with_spans(names: dict[int, set], name_spans: list[tuple[int, int | None, set]]) -> dict[int, set]:
+    """열 이름 + 그 열을 덮는 병합 머리글 이름(같은 줄 다음 글 칸 앞까지 - 다른 줄에서 이름이 붙은 열만)."""
+    out = {c: set(v) for c, v in names.items()}
+    cap = max(names) + 1 if names else 0
+    for s, e, k in name_spans:
+        for c in range(s, cap if e is None else e):
+            if c in out:                          # 아래 층에 이름이 있는 열만(빈 열로 번지지 않게)
+                out[c] |= k
+    return out
+
+
 def _read_sheet(ws, kind: str) -> WpSheet:
     grid = [list(r) for r in ws.iter_rows(values_only=True)]
     sh = WpSheet(ws.title, kind)
@@ -239,6 +285,7 @@ def _read_sheet(ws, kind: str) -> WpSheet:
     hdr: dict[int, tuple] = {}                # 지금 표의 머리글: 열 → (날짜, 기간, 3개월)
     spans: list[tuple[int, int, tuple]] = []  # 병합 머리글이 덮는 열 범위 [시작, 끝)
     names: dict[int, set] = {}                # 열 → 머리글 이름 키
+    name_spans: list[tuple[int, int | None, set]] = []   # 병합 머리글 이름이 덮는 열 [시작, 끝) - 끝 None = 표 끝
     ref_cols: set[int] = set()
     sect: str | None = None
     unit = 1
@@ -250,7 +297,7 @@ def _read_sheet(ws, kind: str) -> WpSheet:
         nums = {c: float(v) for c, v in enumerate(r) if _is_num(v) and c not in ref_cols}
         if len(nums) == 1:                     # 머리글 줄 끝의 환율 · 비율 숫자 하나 ('… | 당기말 | 9.4673')
             tc = [c for c, v in enumerate(r) if isinstance(v, str) and v.strip()]
-            if len(tc) >= 4 and any(_hdr_token(r[c]) for c in tc[1:]):
+            if len(tc) >= 4 and any((t := _hdr_token(r[c])) and not (t[0] and t[0][1] == 0) for c in tc[1:]):
                 nums = {}
         if not nums:
             text_cols = [c for c, v in enumerate(r)
@@ -264,6 +311,7 @@ def _read_sheet(ws, kind: str) -> WpSheet:
                     if m and not _DATE_RE.search(t):
                         sh.blocks.append((int(m.group(1)), _canon(m.group(2)), ri, 0))
                         sect, hdr, spans, names, prev_hdr, hit = None, {}, [], {}, False, True
+                        name_spans = []
                         break
                 if hit:
                     continue
@@ -278,10 +326,19 @@ def _read_sheet(ws, kind: str) -> WpSheet:
             # 머리글 줄 — 앞 줄도 머리글이면 이어 붙이고, 아니면 새 표
             if not prev_hdr:
                 hdr, spans, names, ref_cols = {}, [], {}, set()
-            for c in text_cols:
+                name_spans = []
+            two = len({t[1] for t in (_hdr_token(r[c]) for c in text_cols) if t and t[1]}) >= 2
+            for k, c in enumerate(text_cols):
                 if isinstance(r[c], str):
-                    names[c] = names.get(c, set()) | _name_keys(r[c])
+                    nk = _name_keys(r[c], marks=not two)   # '당기말 | 전기말' 기간 머리글엔 기초 · 기말 이름을 안 붙임
+                    names[c] = names.get(c, set()) | nk
+                    end = text_cols[k + 1] if k + 1 < len(text_cols) else None   # 마지막 = 표 끝 열까지
+                    name_spans.append((c + 1, end, nk))     # 병합 머리글 '매출 등' 이 덮는 오른쪽 열
             toks = {c: t for c, v in enumerate(r) if (t := _hdr_token(v))}
+            years = [c for c, t in toks.items() if t[0] and t[0][1] == 0]
+            if not 2 <= len({toks[c][0][0] for c in years}) <= 3:   # 연도 머리글 = '2026년 | 2025년'(2 ~ 3개) - '만기 2028년' · 만기별 표는 아님
+                for c in years:
+                    del toks[c]
             ref_cols |= {c for c, v in enumerate(r)
                          if isinstance(v, str) and re.fullmatch(r"주석|note|notes?", norm(v), re.I)}
             row_spans = []
@@ -303,10 +360,15 @@ def _read_sheet(ws, kind: str) -> WpSheet:
                 if sp:
                     hdr[c] = (None, sp[1], t3)
                     continue
-                dated = [x for x in hdr if hdr[x][0] and not hdr[x][2] and x != c]
-                right = sorted(x for x in dated if x > c)
-                left = sorted((x for x in dated if x < c), reverse=True)
-                parent = right[0] if right else (left[0] if left else None)
+                dated = [x for x in hdr if hdr[x][0] and x != c]
+                left_all = sorted((x for x in dated if x < c), reverse=True)
+                if cum and left_all and toks.get(left_all[0], (None, None, False))[2]:
+                    parent = left_all[0]           # 날짜 하나가 '3개월 | 누적' 두 칸 위에 병합 - 누적 칸은 왼쪽 날짜
+                else:
+                    dated = [x for x in dated if not hdr[x][2]]
+                    right = sorted(x for x in dated if x > c)
+                    left = sorted((x for x in dated if x < c), reverse=True)
+                    parent = right[0] if right else (left[0] if left else None)
                 if parent is not None:
                     hdr[c] = (hdr[parent][0], hdr[parent][1], t3)
             spans += row_spans
@@ -330,7 +392,7 @@ def _read_sheet(ws, kind: str) -> WpSheet:
                 if c < cap:
                     cols.setdefault(c, (None, only, False))
         sh.rows.append(WpRow(ws.title, ri, " ".join(t.strip() for t in label_texts if t.strip()),
-                             label_keys(label_texts), nums, cols, sect, unit, names))
+                             label_keys(label_texts), nums, cols, sect, unit, _with_spans(names, name_spans)))
     sh.blocks = [(n, k, s, (sh.blocks[i + 1][2] - 1 if i + 1 < len(sh.blocks) else len(grid)))
                  for i, (n, k, s, _) in enumerate(sh.blocks)]
     if kind == "note" and not sh.blocks:     # '투자부동산주석' — 시트 이름이 곧 주석 제목
@@ -557,6 +619,86 @@ def _match_block(sheets: list[WpSheet], note_no: int | None, title: str) -> list
     return by_no
 
 
+def rec_scope(rec: TableRec, sheets: list[WpSheet], fs_rows: list[WpRow]) -> tuple[list[WpRow], str]:
+    """DSD 표 → 조서에서 찾을 범위(행들)와 구획 이름(재무상태표 · 주석N)."""
+    if rec.kind == "NOTE":
+        scope = []
+        for sh, s, e in _match_block(sheets, rec.sec.note_no, rec.sec.note_title or ""):
+            scope += [r for r in sh.rows if s <= r.row <= e]
+        return scope, (f"주석{rec.sec.note_no}" if rec.sec.note_no else "주석")
+    mine = [sh for sh in sheets if sh.kind == "fs" and sh.fs_kind in (rec.kind, "FS")]
+    return ([r for sh in mine for r in sh.rows] if mine else fs_rows), rec.sec.title
+
+
+def common_keys(scope: list[WpRow]) -> set[str]:
+    """범위 안 4행 이상에 나오는 이름 키 = 흔한 키('종속기업' · '기타')."""
+    freq: dict[str, int] = {}
+    for r in scope:
+        for k in r.keys:
+            freq[k] = freq.get(k, 0) + 1
+    return {k for k, n in freq.items() if n >= 4}
+
+
+def table_strict(rec: TableRec) -> bool:
+    """기간이 없는 이름 있는 열이 여럿인 표(범주별 · 변동표 · 자본 구성요소)."""
+    tv = rec.tv
+    named = {frozenset(k) for c in range(tv.ncols)
+             if c not in rec.cur and c not in rec.prev and not _ACCT_HDR_RE.search(norm(tv.col_header(c)))
+             and (k := _name_keys(_leaf(tv, c)))}
+    return len(named) >= 2
+
+
+def col_keys_of(rec: TableRec, c: int) -> tuple[set[str] | None, bool]:
+    """DSD 열 이름 키(머리글 모든 층 - '매출 등/기타')와 '기간이 없는 열' 여부."""
+    parts = rec.tv.col_header(c).split("/")
+    marks = not (rec.cur and rec.prev)             # 기초 · 기말 이름은 한 기간 표('당기초 | … | 당분기말')에서만
+    keys: set[str] = set(_name_keys(parts[-1], marks))
+    for part in parts[:-1]:                        # 위 층은 '^' 표시
+        keys |= {"^" + k for k in _name_keys(part, marks) if k not in keys}
+    neutral = c not in rec.cur and c not in rec.prev and not _ACCT_HDR_RE.search(norm(rec.tv.col_header(c)))
+    if not _leafk(keys):
+        return None, neutral
+    return keys, neutral
+
+
+def same_name_rows(keys: set[str], own: set[str] | None, scope: list[WpRow], common: set[str],
+                   col_keys: set[str] | None = None) -> list[WpRow]:
+    """같은 이름 행 — 시트마다 키 겹침 최대인 행들. 병합 칸(세로 병합된 회사명 등)을 뺀
+    그 행 자신의 이름으로도 한 번 더 고른다 ('(주)갑 | 기초' 아래 '증감' 행)."""
+    def best_rows(ks: set[str]) -> list[WpRow]:
+        best: dict[str, int] = {}
+        by_sheet: dict[str, list[WpRow]] = {}
+        spec = ks - common
+        for row in scope:
+            inter = ks & row.keys
+            if spec and not (inter & spec):    # 범위에 흔한 키('종속기업')만 겹침
+                continue
+            n = len(inter)
+            if n and n >= best.get(row.sheet, 0):
+                if n > best.get(row.sheet, 0):
+                    best[row.sheet], by_sheet[row.sheet] = n, []
+                by_sheet[row.sheet].append(row)
+        return [r for rows in by_sheet.values() for r in rows]
+
+    cands = best_rows(keys)
+    if own and own != keys:
+        cands += [r for r in best_rows(own) if r not in cands]
+    if col_keys and len(cands) > 1:            # 같은 회사 · 계정 이름이 여러 표에 — DSD 열 이름이 있는 표
+        pref = [r for r in cands if any(_names_hit(r.names.get(c, set()), col_keys, True) for c in r.nums)]
+        pref = pref or [r for r in cands if any(_names_hit(r.names.get(c, set()), col_keys) for c in r.nums)]
+        if pref:
+            cands = pref
+    return cands
+
+
+def row_keys(tv, i: int) -> tuple[str, set[str], set[str]]:
+    """DSD 행 → (이름 글, 이름 키, 병합 칸을 뺀 자기 이름 키)."""
+    texts = [tv.text(i, c) for c in range(tv.ncols) if tv.text(i, c).strip() and tv.value(i, c) is None]
+    own = label_keys([tv.cell(i, c).text for c in range(tv.ncols)
+                      if tv.cell(i, c) is not None and tv.value(i, c) is None])
+    return " ".join(t.strip() for t in texts), label_keys(texts), own
+
+
 @dataclass
 class ReconConfig:
     """건별 설정(_engagement/dsd_recon.json 의 '별도' · '연결' 한쪽)."""
@@ -605,43 +747,19 @@ def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False,
         rep.warnings.append("조서에서 숫자를 못 읽음 — 계산값이 없는 파일이면 엑셀에서 열어 저장한 뒤 다시 실행")
 
     recs, _ = scan(doc)
-    common_of: dict[int, set[str]] = {}
     for rec in recs:
         if rec.kind in ("OTHER", "RE"):
             continue
         tv = rec.tv
-        if rec.kind == "NOTE":
-            scope = []
-            for sh, s, e in _match_block(sheets, rec.sec.note_no, rec.sec.note_title or ""):
-                scope += [r for r in sh.rows if s <= r.row <= e]
-            ctx = f"주석{rec.sec.note_no}" if rec.sec.note_no else "주석"
-        else:
-            mine = [sh for sh in sheets if sh.kind == "fs" and sh.fs_kind in (rec.kind, "FS")]
-            scope = [r for sh in mine for r in sh.rows] if mine else fs_rows
-            ctx = rec.sec.title
+        scope, ctx = rec_scope(rec, sheets, fs_rows)
         periods = _cell_periods(rec, per.year if per else None)
         unit = tv.unit
-        if id(scope) not in common_of:         # 범위 안 4행 이상에 나오는 이름 키 = 흔한 키
-            freq: dict[str, int] = {}
-            for r in scope:
-                for k in r.keys:
-                    freq[k] = freq.get(k, 0) + 1
-            common_of.clear()
-            common_of[id(scope)] = {k for k, n in freq.items() if n >= 4}
-        common = common_of[id(scope)]
-        # 기간이 없는 이름 있는 열이 여럿인 표(범주별 · 변동표 · 자본 구성요소)
-        named_cols = {frozenset(k) for c in range(tv.ncols)
-                      if c not in rec.cur and c not in rec.prev and (k := _name_keys(_leaf(tv, c)))}
-        strict = len(named_cols) >= 2
+        common = common_keys(scope)
+        strict = table_strict(rec)
         has_cols: dict[tuple, bool] = {}          # (기간, 3개월) → 범위에 그 기간 열이 있나
         for i in tv.body:
-            texts = [tv.text(i, c) for c in range(tv.ncols)
-                     if tv.text(i, c).strip() and tv.value(i, c) is None]
-            label = " ".join(t.strip() for t in texts)
-            keys = label_keys(texts)
+            label, keys, own = row_keys(tv, i)
             keys |= cfg.alias_keys(keys)
-            own = label_keys([tv.cell(i, c).text for c in range(tv.ncols)    # 병합 칸 제외
-                              if tv.cell(i, c) is not None and tv.value(i, c) is None])
             for c in range(tv.ncols):
                 v = tv.value(i, c)
                 if v is None or _SKIP_HDR_RE.search(norm(tv.col_header(c))):
@@ -662,8 +780,7 @@ def reconcile(doc: Document, sheets: list[WpSheet], include_prior: bool = False,
                     continue
                 # DSD 열 이름 — 기간이 없는 열('연이자율(%)', 변동표 '취득')은 이름으로 조서 열을 찾고,
                 # 기간 열('전기말/총장부금액')은 기간이 맞는 열 중 같은 이름 열을 먼저 본다
-                col_keys = _name_keys(_leaf(tv, c)) or None
-                neutral = c not in rec.cur and c not in rec.prev
+                col_keys, neutral = col_keys_of(rec, c)
                 hk = (period, is3m, target, frozenset(col_keys or ()), neutral)
                 if hk not in has_cols:
                     has_cols[hk] = any(_row_cols(r, target, period, is3m, one_q, col_keys, False,
@@ -710,11 +827,15 @@ def _row_cols(row: WpRow, target, period: str, is3m: bool, one_q: bool,
         d, p, t3 = row.cols[c]
         if not one_q and t3 != is3m:
             return False
-        return (d is not None and target is not None and d == target) or (d is None and p == period)
+        return ((d is not None and target is not None and (d == target or (d[1] == 0 and d[0] == target[0])))
+                or (d is None and p == period))
 
     rp = _row_period(row)
     if col_keys and neutral:
-        named = _named(row, list(row.nums), col_keys)
+        named = [c for c in _named(row, sorted(row.names), col_keys) if c in row.nums]
+        if not named and (any(_names_hit(row.names.get(c, set()), col_keys) for c in row.names)
+                          or any(row.names.get(c) for c in row.nums)):
+            return [], True                     # 이름이 맞는 열이 이 행에서 빈 칸 / 값 열마다 이름이 있는데 안 맞음(다른 표)
         ok = [c for c in named if (period_ok(c) if c in info
                                    else rp == period or (rp is None and loose))]
         if ok:
@@ -759,31 +880,8 @@ def _judge(item: Item, v, keys: set[str], scope: list[WpRow], target, period: st
             item.verdict = "일치" if ok else "부호 다름"
             item.how = how.replace("부호", "부호 표기")
 
-    # 1) 같은 이름 행 — 시트마다 키 겹침 최대인 행들. 병합 칸(세로 병합된 회사명 등)을 뺀
-    #    그 행 자신의 이름으로도 한 번 더 고른다 ('(주)갑 | 기초' 아래 '증감' 행)
-    def best_rows(ks: set[str]) -> list[WpRow]:
-        best: dict[str, int] = {}
-        by_sheet: dict[str, list[WpRow]] = {}
-        spec = ks - common
-        for row in scope:
-            inter = ks & row.keys
-            if spec and not (inter & spec):    # 범위에 흔한 키('종속기업')만 겹침
-                continue
-            n = len(inter)
-            if n and n >= best.get(row.sheet, 0):
-                if n > best.get(row.sheet, 0):
-                    best[row.sheet], by_sheet[row.sheet] = n, []
-                by_sheet[row.sheet].append(row)
-        return [r for rows in by_sheet.values() for r in rows]
-
-    cands = best_rows(keys)
-    if own and own != keys:
-        cands += [r for r in best_rows(own) if r not in cands]
-    if col_keys and len(cands) > 1:            # 같은 회사 · 계정 이름이 여러 표에 — DSD 열 이름이 있는 표
-        pref = [r for r in cands if any(_names_hit(r.names.get(c, set()), col_keys, True) for c in r.nums)]
-        pref = pref or [r for r in cands if any(_names_hit(r.names.get(c, set()), col_keys) for c in r.nums)]
-        if pref:
-            cands = pref
+    # 1) 같은 이름 행
+    cands = same_name_rows(keys, own, scope, common, col_keys)
     for row in cands:
         cols, _ = val_cols(row)
         for col in cols:

@@ -150,27 +150,40 @@ def vocab_rules(src_q: int, dst_q: int) -> list[tuple[re.Pattern, str]]:
 _SPACED_HANGUL_RE = re.compile(r"(?:[가-힣]\s){3,}[가-힣]")
 
 
-def _sub_all(text: str, rules: list[tuple[re.Pattern, str]]) -> str:
+# 치환하면 안 되는 낱말 - '일반기업회계기준'의 '반기', '구분기준'의 '분기' (2026-10-23 3분기 DSD 실측).
+# 회사마다 더 있으면 PROTECT_WORDS 에 더하거나 apply_vocab(…, protect=[…]).
+PROTECT_WORDS = ["일반기업", "일반기준", "일반적", "일반", "구분기준", "구분기", "기분기"]
+
+
+def _sub_all(text: str, rules: list[tuple[re.Pattern, str]], protect=None) -> str:
+    words = sorted(set(PROTECT_WORDS) | set(protect or []), key=len, reverse=True)
+    keep: list[str] = []
+
+    def hide(m):
+        keep.append(m.group(0))
+        return "\x00%d\x00" % (len(keep) - 1)
+    if words:
+        text = re.sub("|".join(re.escape(w) for w in words), hide, text)
     for pat, rep in rules:
         text = pat.sub(rep, text)
-    return text
+    return re.sub(r"\x00(\d+)\x00", lambda m: keep[int(m.group(1))], text)
 
 
-def apply_vocab(text: str, rules: list[tuple[re.Pattern, str]]) -> str:
+def apply_vocab(text: str, rules: list[tuple[re.Pattern, str]], protect=None) -> str:
     """어휘 규칙 적용. 자간 벌린 구간('반 기 재 무 상 태 표')은 공백을 접어
-    규칙을 태운 뒤 같은 자간(한 글자마다 공백)으로 되돌린다."""
+    규칙을 태운 뒤 같은 자간(한 글자마다 공백)으로 되돌린다. protect = 치환하지 않을 낱말 더하기."""
     if not rules or not text:
         return text
     out: list[str] = []
     pos = 0
     for m in _SPACED_HANGUL_RE.finditer(text):
-        out.append(_sub_all(text[pos:m.start()], rules))
+        out.append(_sub_all(text[pos:m.start()], rules, protect))
         run = m.group(0)
         folded = re.sub(r"\s+", "", run)
-        new = _sub_all(folded, rules)
+        new = _sub_all(folded, rules, protect)
         out.append(run if new == folded else " ".join(new))
         pos = m.end()
-    out.append(_sub_all(text[pos:], rules))
+    out.append(_sub_all(text[pos:], rules, protect))
     return "".join(out)
 
 
