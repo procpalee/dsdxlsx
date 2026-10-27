@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .model import Node, Row
@@ -62,6 +63,23 @@ def clone_row(data: bytes, template: Row, new_texts: dict[int, str]) -> bytes:
         cell = template.cells[i]
         raw[cell.inner_start - base : cell.inner_end - base] = escape_text(new_texts[i])
     return bytes(raw)
+
+
+def cell_with_text(data: bytes, cell: Node, text: str, *, drop_rowspan: bool = False,
+                   height: bytes | None = None) -> bytes:
+    """셀 하나의 원시 바이트를 복제해 inner 텍스트만 바꾼다(빈 셀 '<TD .../>' 도 여닫는 꼴로).
+    drop_rowspan: ROWSPAN 속성 제거(세로 병합 칸을 한 행짜리 칸으로), height: HEIGHT 값 교체."""
+    tag_end = cell.inner_start
+    open_tag = data[cell.start:tag_end]
+    if open_tag.endswith(b"/>"):
+        open_tag, close = open_tag[:-2].rstrip() + b">", b"</" + cell.tag.encode() + b">"
+    else:
+        close = data[cell.inner_end:cell.end]
+    if drop_rowspan:
+        open_tag = re.sub(rb'\s+ROWSPAN="\d+"', b"", open_tag)
+    if height is not None:
+        open_tag = re.sub(rb'HEIGHT="\d+"', b'HEIGHT="' + height + b'"', open_tag)
+    return open_tag + escape_text(text) + close
 
 
 def insert_after_row(row: Row, tr_bytes: bytes) -> Op:

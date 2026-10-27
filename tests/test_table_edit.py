@@ -3,6 +3,7 @@ import pytest
 from openpyxl import load_workbook
 
 from dsdxlsx import compose, markers
+from dsdxlsx import grid as grid_mod
 from dsdxlsx.import_xlsx import ImportError_, import_xlsx
 from dsdxlsx.parse import parse_contents
 
@@ -194,3 +195,59 @@ def test_compose_harvest_rejects_grouped_template():
     table = next(iter(doc.tables.values()))
     with pytest.raises(compose.ComposeError, match="TABLE-GROUP"):
         compose.harvest(doc, table)
+
+
+# ── 행 추가 본보기: 가로 병합 줄 · 세로 병합 묶음 ───────────────────────
+
+def _span_doc(tmp_path):
+    """본문이 모두 세로 병합 묶음 + 합계 줄(구분 · 이름 가로 병합)뿐인 표 - 보통 행이 없다."""
+    from dsdxlsx.export_xlsx import export_xlsx
+
+    span = factory.table(
+        [["구  분", "특수관계자명", "매출 등"]],
+        [
+            ["||ROWSPAN=2||종속기업", "A사", "100"],
+            ["B사", "200"],
+            ["||ROWSPAN=2||기타", "C사", "300"],
+            ["D사", "400"],
+            ["||COLSPAN=2||합  계", "1,000"],
+        ],
+        ncols=3,
+    )
+    base = factory.standard_contents()
+    tail = "\r\n" + factory.p("8. 특수관계자\n거래 내역은 다음과 같습니다.") + "\r\n\r\n" + span + "\r\n"
+    contents = base.replace(b"\r\n</DOCUMENT>", tail.encode("utf-8") + b"</DOCUMENT>")
+    dsd_path = tmp_path / "span.dsd"
+    dsd_path.write_bytes(factory.dsd_bytes(contents))
+    xlsx = str(tmp_path / "span.xlsx")
+    export_xlsx(parse_contents(contents), dsd_path.read_bytes(), str(dsd_path), xlsx)
+    return contents, xlsx
+
+
+def test_row_insert_never_clones_colspan_total_row(tmp_path):
+    """합계 줄(COLSPAN 2)을 본보기로 쓰면 새 행의 이름 칸이 사라진다 - 묶음 안 행을 본보기로
+    전체 폭 행을 만들고, 세로 병합 자리는 ROWSPAN 없는 칸으로 채운다."""
+    contents, xlsx = _span_doc(tmp_path)
+    wb = load_workbook(xlsx)
+    ws = wb["8"]
+    rows = {ws.cell(r, 3).value: r for r in range(1, ws.max_row + 1)}
+    ws.insert_rows(rows["D사"] + 1)
+    ws.cell(rows["D사"] + 1, 3, "F사"); ws.cell(rows["D사"] + 1, 4, 60)
+    ws.insert_rows(rows["B사"] + 1)
+    ws.cell(rows["B사"] + 1, 2, "관계기업"); ws.cell(rows["B사"] + 1, 3, "E사"); ws.cell(rows["B사"] + 1, 4, 50)
+    wb.save(xlsx)
+
+    _, new_contents, rep = import_xlsx(xlsx)
+    assert len(rep.row_inserts) == 2
+    doc = parse_contents(contents)
+    doc2 = parse_contents(new_contents)
+    tid = next(t for t, tb in doc2.tables.items() if any(c.text == "E사" for r in tb.rows for c in r.cells))
+    t2 = doc2.tables[tid]
+    assert len(t2.rows) == len(doc.tables[tid].rows) + 2
+    texts = {tuple(c.text for c in r.cells) for r in t2.rows}
+    assert ("관계기업", "E사", "50") in texts
+    assert ("", "F사", "60") in texts
+    new_rows = [r for r in t2.rows if any(c.text in ("E사", "F사") for c in r.cells)]
+    assert all(len(r.cells) == 3 and all(c.rowspan == 1 and c.colspan == 1 for c in r.cells) for r in new_rows)
+    g = grid_mod.expand(t2)
+    assert not t2.irregular and all(gc is not None for row in g for gc in row)

@@ -740,18 +740,25 @@ def _emit_inserts(doc, table: Table, anchor_rid, new_entries, deleted, ops, repo
         return
 
     template = _pick_template(table, insert_idx)
-    if template is None:
+    span_tpl = _pick_span_template(table, insert_idx) if template is None else None
+    if template is None and span_tpl is None:
+        template = _pick_template(table, insert_idx, allow_hspan=True)   # 표 전체가 가로 병합 꼴일 때만
+    if template is None and span_tpl is None:
         errors.append(f"표 {table.id}: 복제 가능한 템플릿 행(ACOPY=Y, 병합 없음)이 없음")
         return
 
-    tpl_idx = index_of[template.id]
     payload = b""
     for entry in new_entries:
-        texts: dict[int, str] = {}
-        for ci, cell in enumerate(template.cells):
-            col = grid_mod.cell_grid_col(table, tpl_idx, cell)
-            texts[ci] = _cell_value_to_text(entry.values.get(2 + col))
-        payload += splice.ROW_SEP + splice.clone_row(doc.data, template, texts)
+        if template is not None:
+            tpl_idx = index_of[template.id]
+            texts: dict[int, str] = {}
+            for ci, cell in enumerate(template.cells):
+                col = grid_mod.cell_grid_col(table, tpl_idx, cell)
+                texts[ci] = _cell_value_to_text(entry.values.get(2 + col))
+            payload += splice.ROW_SEP + splice.clone_row(doc.data, template, texts)
+        else:
+            texts_by_col = {c: _cell_value_to_text(entry.values.get(2 + c)) for c in range(table.ncols)}
+            payload += splice.ROW_SEP + _clone_filling_spans(doc.data, table, span_tpl, texts_by_col)
         report.row_inserts.append(
             f"{table.id} {'r%03d' % (insert_idx + 1)} 위치에 신규 행 "
             f"[{entry.sheet}!{entry.xlsx_row}행]"
@@ -769,8 +776,10 @@ def _emit_inserts(doc, table: Table, anchor_rid, new_entries, deleted, ops, repo
         ops.append(splice.Op(pos=first.start, start=first.start, end=first.start, payload=payload))
 
 
-def _pick_template(table: Table, insert_idx: int):
-    """삽입 지점 주변에서 복제 안전한 행 선택: TBODY + ACOPY=Y + 병합 무관 + 전체 폭."""
+def _pick_template(table: Table, insert_idx: int, allow_hspan: bool = False):
+    """삽입 지점 주변에서 복제 안전한 행 선택: TBODY + ACOPY=Y + 병합 무관 + 전체 폭.
+    가로 병합(COLSPAN) 행은 빼는 것이 기본 - '합  계'처럼 구분 · 이름 열을 합친 줄을 복제하면
+    새 행의 칸이 하나 모자라 값이 사라진다. allow_hspan 은 그런 행밖에 없는 표의 마지막 대안."""
     g = grid_mod.expand(table)
 
     def ok(i: int) -> bool:
@@ -781,6 +790,8 @@ def _pick_template(table: Table, insert_idx: int):
             return False
         if any(c.rowspan > 1 for c in row.cells):
             return False
+        if not allow_hspan and any(c.colspan > 1 for c in row.cells):
+            return False
         return True
 
     candidates = list(range(insert_idx - 1, -1, -1)) + list(range(insert_idx, len(table.rows)))
@@ -788,6 +799,42 @@ def _pick_template(table: Table, insert_idx: int):
         if ok(i):
             return table.rows[i]
     return None
+
+
+def _pick_span_template(table: Table, insert_idx: int):
+    """보통 행이 없을 때(본문이 모두 세로 병합 묶음): 묶음의 이어지는 행(세로 병합 칸만 빠지고
+    자기 칸은 병합 없음)을 고른다. 복제할 때 빠진 열은 묶음 주인 칸을 ROWSPAN 없이 채운다."""
+    g = grid_mod.expand(table)
+
+    def ok(i: int) -> bool:
+        row = table.rows[i]
+        if row.in_thead or not row.acopy or not row.cells:
+            return False
+        if any(c.rowspan > 1 or c.colspan > 1 for c in row.cells):
+            return False
+        return any(gc is not None and gc.kind == "vspan" for gc in g[i]) and all(gc is not None for gc in g[i])
+
+    candidates = list(range(insert_idx - 1, -1, -1)) + list(range(insert_idx, len(table.rows)))
+    return next((i for i in candidates if ok(i)), None)
+
+
+def _clone_filling_spans(data: bytes, table: Table, idx: int, texts_by_col: dict[int, str]) -> bytes:
+    """idx 행(세로 병합 묶음 안 행)을 복제해 전체 폭 새 행을 만든다: 자기 칸은 그대로, 세로 병합
+    자리(vspan)는 묶음 주인 칸을 ROWSPAN 없이 · 이 행 높이로 복제. 칸 사이 공백은 원문 관례."""
+    row = table.rows[idx]
+    g = grid_mod.expand(table)[idx]
+    cells = row.cells
+    sep = data[cells[0].end:cells[1].start] if len(cells) > 1 else b"\r\n"
+    m = re.search(rb'HEIGHT="(\d+)"', data[cells[0].start:cells[0].inner_start])
+    height = m.group(1) if m else None
+    parts = []
+    for c, gc in enumerate(g):
+        if gc.kind == "cell":
+            parts.append(splice.cell_with_text(data, gc.node, texts_by_col.get(c, "")))
+        elif gc.kind == "vspan" and (c == 0 or g[c - 1].node is not gc.node):
+            parts.append(splice.cell_with_text(data, gc.node, texts_by_col.get(c, ""),
+                                               drop_rowspan=True, height=height))
+    return data[row.start:cells[0].start] + sep.join(parts) + data[cells[-1].end:row.end]
 
 
 def import_xlsx(xlsx_path: str) -> tuple[DsdPackage, bytes, Report]:
