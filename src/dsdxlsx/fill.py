@@ -353,7 +353,8 @@ def _choose(opts, pv, scales, last_row, mag=None, unit: int = 1):
                 return hit[0][0][2], [(hit[0][0][0], hit[0][0][1])], hit[0][1], "앵커(전기 값 일치)"
             hit = _after(hit, last_row, key=lambda x: x[0][0])
             if hit:
-                return hit[0][2], [(hit[0][0], hit[0][1])], None, "앵커 · 다음 행"
+                o = hit[0][0]                  # _after 는 (후보, 배수) 짝을 돌려준다
+                return o[2], [(o[0], o[1])], None, "앵커 · 다음 행"
         rows = {}
         for o in opts:                         # 행마다 첫 값
             rows.setdefault(id(o[0]), o)
