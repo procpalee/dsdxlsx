@@ -105,3 +105,46 @@ def test_rows_spec_and_template():
     assert B._template("{D1:,.0f}\nUSD {D1:,.0f}", ws) == "1,234,567\nUSD 1,234,567"
     assert B._template("{D2*100:.2f}", ws) == "5.14"
     assert B._template("{D3:.2f}", ws) is None      # 숫자 아님 - 칸을 건드리지 않음
+
+
+def test_template_sum_negate_and_number():
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws["E1"], ws["E2"], ws["F1"] = 2222160000, 10000000000, -21516632
+    assert B._template("{E1+E2}", ws) == 12222160000       # 식 하나뿐 → 숫자(DSD 숫자 서식)
+    assert B._template("{-F1}", ws) == 21516632
+    assert B._template("{E1+E3}", ws) == 2222160000          # 더하기 식의 빈 칸은 0
+    assert B._fmt(0.04593, "pct2", 1) == 4.59
+
+
+def test_order_first_label_null_skip_and_cell_row_id(tmp_path):
+    skel, wp = _setup(tmp_path)
+    sheet, tid, rid = _locate(skel, tmp_path, "보증금")
+    recipe = {
+        "tables": [{"sheet": sheet, "table": tid, "match": "order", "first": "보증금", "src": "추가",
+                    "rows": [3, None], "cols": {"C": "C"}}],
+        "cells": [{"sheet": sheet, "table": tid, "row": rid, "col": "D", "src": "추가", "template": "{D5*100:.2f}"}],
+    }
+    out, rep = _build(tmp_path, skel, wp, recipe)
+    assert _row(parse_contents(read_dsd(out).contents), "보증금")[1:3] == ["77", "5.14"]
+    assert not [w for w in rep.warnings if "건너뜀" in w or "행 없음" in w]
+
+
+def test_paragraph_line_mode_replaces_numbers_only():
+    wb = openpyxl.Workbook()
+    js = wb.active
+    js.title = "20"
+    js["B32"] = "당분기말 현재 부채요소 13,536,987천원과 자산요소 2,425,217천원입니다."
+    js["D16"] = 5353754
+    dw = openpyxl.Workbook()
+    ws = dw.active
+    ws.title = "20"
+    ws["A1"], ws["B1"] = "p118", "머리 줄\n당반기말 현재 부채요소 1,000천원과 자산요소 2,000천원으로 구성"
+    ws["A2"], ws["B2"] = "p126", "변제받을 것으로 예상되는 금액 9천원"
+    c = B._Ctx(dw, wb, {"paragraphs": [
+        {"sheet": "20", "para": "p118", "mode": "line", "contains": ["부채요소"], "src": "20!B32"},
+        {"sheet": "20", "para": "p126", "mode": "line", "contains": ["변제받을"], "src": "20", "set": {"0": "{D16}"}},
+    ]}, B.BuildReport())
+    B._step_paragraphs(c)
+    assert ws["B1"].value == "머리 줄\n당반기말 현재 부채요소 13,536,987천원과 자산요소 2,425,217천원으로 구성"
+    assert ws["B2"].value == "변제받을 것으로 예상되는 금액 5,353,754천원"

@@ -12,9 +12,9 @@ fill 이 못 맞추는 다열 · 그룹 · 중복 이름 표를 레시피 tables
   aliases     {정규화 이름: 정규화 이름} - 행 이름 짝짓기 별칭
   labels      [{sheet, table, row_label, src}]              DSD 행 이름을 정산표 칸 글로
   tables      [{sheet, table, match: label|order, ...}]     표 덮어쓰기(아래)
-  cells       [{sheet, table, row_label, col, template}]    한 칸을 정산표 칸으로 만든 글로('{D12*100:.2f}')
+  cells       [{sheet, table, row_label | row, col, src, template}] 한 칸을 정산표 칸 글로('{D12*100:.2f}' · '{E46+E47}' · '{-F124}')
   subtotals   [{sheet, table, row_label, cols, prev}]       바로 위 prev 줄 합
-  paragraphs  [{sheet, para, src, mode: numbers|sentence, contains}]
+  paragraphs  [{sheet, para, src, mode: numbers|sentence|line, contains, set}] - line: contains 로 고른 줄의 숫자만 바꿈(set {줄 숫자 순번: 정산표 글 숫자 순번 | 칸 틀})
   keep        [{sheet, table, skip_header, cols, num_cols}] 같은 행 ID · 이름이면 reference 값 유지
   unit_suffix true 면 reference 같은 표 · 행 · 열 서식의 '주' · '%' 를 글로 붙임
   text        [{start, end, replace: [[옛, 새]], protect: [낱말]}]  contents.xml 구간 글 바꾸기
@@ -22,11 +22,11 @@ fill 이 못 맞추는 다열 · 그룹 · 중복 이름 표를 레시피 tables
 
 tables 항목:
   공통  sheet(DSD export 시트) · table(t###) · src(정산표 시트) · rows('34-53' · [157, 158] · '7-11,54')
-        cols {DSD 열: 정산표 열} · formats {DSD 열: rate2 | raw | {prefix_by_row: {정산표 행: 'USD'}}}
+        cols {DSD 열: 정산표 열} · formats {DSD 열: rate2 | pct2(×100) | raw | {prefix_by_row: {정산표 행: 'USD'}}}
   label  dsd_label(['B']) · src_label(['B']) · skip_header(1) · range(['r002', 'r009'])
          total_pattern + total_cols - 구분 합계 줄(현금흐름표 Ⅰ~Ⅶ)은 다른 열 대응
          keep_currency - DSD 칸이 'USD 1,800,000' 꼴이면 그 통화를 붙여 씀 / none_as_zero - 빈 칸은 0
-  order  first(r###) - 이 행부터 rows 순서대로
+  order  first(r### | 행 이름 글귀 '(당기초)') - 이 행부터 rows 순서대로(rows 의 null = 그 DSD 행 건너뜀)
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import openpyxl
+from openpyxl.cell.cell import MergedCell
 from openpyxl.utils import column_index_from_string as CI
 
 from .dsd_io import read_dsd, write_dsd
@@ -124,30 +125,53 @@ def _fmt(v, how, src_row):
         return v
     if how == "rate2":
         return f"{v:.2f}" if isinstance(v, (int, float)) else v
+    if how == "pct2":                                   # 정산표 비율(0.0459) → DSD % 숫자(4.59)
+        return round(v * 100, 2) if isinstance(v, (int, float)) and not isinstance(v, bool) else v
     if isinstance(how, dict) and "prefix_by_row" in how:
         cur = how["prefix_by_row"].get(str(src_row))
         return f"{cur} {v:,.0f}" if cur else num(v)
     return num(v)
 
 
-_TPL = re.compile(r"\{([A-Z]+\d+)(?:\*([\d.]+))?(?::([^}]*))?\}")
+_TPL = re.compile(r"\{(-?[A-Z]+\d+(?:[+-][A-Z]+\d+)*)(?:\*([\d.]+))?(?::([^}]*))?\}")
+_TERM = re.compile(r"([+-]?)([A-Z]+\d+)")
 
 
 def _template(tpl: str, js):
-    """'{D64:,.0f}\\nUSD {D47:,.0f}' · '{D12*100:.2f}' - 칸 값이 숫자가 아니면 None."""
+    """'{D64:,.0f}\\nUSD {D47:,.0f}' · '{D12*100:.2f}' · '{E46+E47}' · '{-F124}' - 칸 값이 숫자가 아니면 None
+    (더하기 · 빼기 식은 빈 칸을 0 으로)."""
     ok = True
 
     def rep(m):
         nonlocal ok
-        v = js[m.group(1)].value
+        terms = _TERM.findall(m.group(1))
+        if len(terms) == 1 and not terms[0][0]:
+            v = js[terms[0][1]].value
+        else:
+            v = 0
+            for sign, ref in terms:
+                x = js[ref].value
+                if x is None:
+                    continue
+                if not isinstance(x, (int, float)) or isinstance(x, bool):
+                    ok = False
+                    return ""
+                v += -x if sign == "-" else x
         if not isinstance(v, (int, float)) or isinstance(v, bool):
             ok = False
             return ""
         if m.group(2):
             v = v * float(m.group(2))
+        vals.append(v)
         return format(v, m.group(3) or "")
+    vals: list = []
     out = _TPL.sub(rep, tpl)
-    return out if ok else None
+    if not ok:
+        return None
+    whole = _TPL.fullmatch(tpl)
+    if whole and not whole.group(3):                   # 식 하나뿐(서식 없음) → 숫자로 넣어 DSD 숫자 서식을 따름
+        return num(vals[0])
+    return out
 
 
 def _src_cell(jw, ref: str):
@@ -263,16 +287,26 @@ def _table_label(c: _Ctx, it):
 def _table_order(c: _Ctx, it):
     ws, js, tid = c.dw[it["sheet"]], c.jw[it["src"]], it["table"]
     rs = _rows_of(ws, tid)
-    idx = [i for i, r in enumerate(rs) if r[0].value == f"{tid}.{it['first']}"][0]
+    first = it["first"]
+    if re.fullmatch(r"r\d+", first):
+        idx = [i for i, r in enumerate(rs) if r[0].value == f"{tid}.{first}"][0]
+    else:                                       # 행 이름 글귀('(당기초)') - 밀기로 앞 행 수가 바뀌어도 안 밀림
+        idx = next(i for i, r in enumerate(rs) if c.norm(first) in c.norm(r[1].value))
     formats = it.get("formats", {})
-    for k, ji in enumerate(_rows_spec(it["rows"])):
+    seq = [None if x is None else x for x in it["rows"]] if isinstance(it["rows"], list) and None in it["rows"] \
+        else _rows_spec(it["rows"])
+    for k, ji in enumerate(seq):
+        if ji is None:                          # null = 이 DSD 행은 건너뜀(구분 머리글 · 소계 줄)
+            continue
         if idx + k >= len(rs):
             c.log(f"{tid} 행 순서 대응: 정산표 {ji}행에 맞는 DSD 행 없음")
             break
         r = rs[idx + k]
         for dc, jc in it["cols"].items():
+            if isinstance(r[CI(dc) - 1], MergedCell):     # 병합된 칸(구분 합계 줄 등)은 건너뜀
+                continue
             r[CI(dc) - 1].value = _fmt(js[f"{jc}{ji}"].value, formats.get(dc), ji)
-    return len(_rows_spec(it["rows"]))
+    return len(seq)
 
 
 def _step_tables(c: _Ctx):
@@ -286,16 +320,18 @@ def _step_tables(c: _Ctx):
 def _step_cells(c: _Ctx):
     for it in c.recipe.get("cells", []):
         js = c.jw[it["src"]]
-        want = c.norm(it["row_label"])
+        want = c.norm(it.get("row_label"))
+        rid = f"{it['table']}.{it['row']}" if it.get("row") else None     # 행 이름이 빈 줄(병합된 차입처 등)은 행 ID
         hit = False
         for r in _rows_of(c.dw[it["sheet"]], it["table"]):
-            if want in c.norm(r[1].value) if it.get("contains") else c.norm(r[1].value) == want:
+            if (r[0].value == rid) if rid else \
+                    (want in c.norm(r[1].value) if it.get("contains") else c.norm(r[1].value) == want):
                 v = _template(it["template"], js)
                 if v is not None:
                     r[CI(it["col"]) - 1].value = v
                 hit = True
         if not hit:
-            c.log(f"칸 {it['sheet']}/{it['table']} '{it['row_label']}' 행 없음")
+            c.log(f"칸 {it['sheet']}/{it['table']} '{it.get('row') or it.get('row_label')}' 행 없음")
 
 
 def _step_subtotals(c: _Ctx):
@@ -309,15 +345,43 @@ def _step_subtotals(c: _Ctx):
                     r[CI(col) - 1].value = sum(num(v) or 0 for v in vals if isinstance(v, (int, float)))
 
 
+def _line_numbers(c: _Ctx, it, ln: str) -> str:
+    """mode line: contains 로 고른 줄의 숫자만 바꾼다. set {DSD 줄 숫자 순번: 정산표 글 숫자 순번(int) | 칸 틀(str)},
+    set 이 없으면 정산표 글(src = '시트!칸') 숫자를 순서대로(개수가 같을 때). 칸 틀의 시트는 src 의 시트."""
+    dn = re.findall(NUM, ln)
+    sheet = it["src"].rsplit("!", 1)[0]
+    jt = str(_src_cell(c.jw, it["src"]).value) if "!" in it["src"] else ""
+    jn = re.findall(NUM, jt)
+    pick = it.get("set") or ({str(i): i for i in range(len(dn))} if len(dn) == len(jn) else None)
+    if pick is None:
+        c.log(f"{it['para']} 숫자 개수 다름 {dn} / {jn}")
+        return ln
+    new = {}
+    for k, src in pick.items():
+        if isinstance(src, int):
+            new[int(k)] = jn[src] if src < len(jn) else None
+        else:
+            v = _template(src, c.jw[sheet])
+            new[int(k)] = f"{v:,.0f}" if isinstance(v, (int, float)) else v
+    if any(v is None for v in new.values()):
+        c.log(f"{it['para']} 정산표 숫자 없음 {pick}")
+        return ln
+    pos = iter(range(len(dn)))
+    return re.sub(NUM, lambda m: (lambda i: new.get(i, m.group(0)))(next(pos)), ln)
+
+
 def _step_paragraphs(c: _Ctx):
     for it in c.recipe.get("paragraphs", []):
-        jt = str(_src_cell(c.jw, it["src"]).value)
+        jt = str(_src_cell(c.jw, it["src"]).value) if "!" in it["src"] else ""
         for r in c.dw[it["sheet"]].iter_rows():
             if r[0].value != it["para"]:
                 continue
             lines = str(r[1].value).split("\n")
             for k, ln in enumerate(lines):
-                if it.get("mode") == "sentence":
+                if it.get("mode") == "line":
+                    if all(m in ln for m in it.get("contains", [])):
+                        lines[k] = _line_numbers(c, it, ln)
+                elif it.get("mode") == "sentence":
                     marks = it.get("contains", [])
                     if marks and all(m in ln for m in marks):
                         lines[k] = ln[:ln.index(marks[0])] + jt
