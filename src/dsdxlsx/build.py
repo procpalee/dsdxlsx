@@ -18,6 +18,7 @@ fill 이 못 맞추는 다열 · 그룹 · 중복 이름 표를 레시피 tables
   keep        [{sheet, table, skip_header, cols, num_cols}] 같은 행 ID · 이름이면 reference 값 유지
   unit_suffix true 면 reference 같은 표 · 행 · 열 서식의 '주' · '%' 를 글로 붙임
   text        [{start, end, replace: [[옛, 새]], protect: [낱말]}]  contents.xml 구간 글 바꾸기
+  output      (xlwork 리본이 읽음) 출력 이름 틀 '{dir}/회사_재무제표_v{version}.dsd' - build 자체는 -o 를 쓴다
 
 tables 항목:
   공통  sheet(DSD export 시트) · table(t###) · src(정산표 시트) · rows('34-53' · [157, 158] · '7-11,54')

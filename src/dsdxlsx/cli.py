@@ -747,6 +747,8 @@ def cmd_build(args) -> int:
 
     out = args.out or os.path.splitext(args.file)[0] + "_빌드.dsd"
     edits = B.outside_edits(out)
+    if edits is None and os.path.exists(out) and not args.force:
+        edits = ["(build 로 만든 기록이 없는 파일 - 손으로 만들었거나 이전 방식으로 만든 DSD)"]
     if edits and not args.force:
         print(f"멈춤: {out} 이(가) 지난 build 뒤에 직접 고쳐졌습니다 - 다시 만들면 아래 수정이 사라집니다.",
               file=sys.stderr)
@@ -754,7 +756,7 @@ def cmd_build(args) -> int:
             print(f"  {ln}", file=sys.stderr)
         print("숫자는 정산표에, 행 · 표 · 문구는 뼈대 DSD 에 옮긴 뒤 다시 build 하세요(그대로 덮으려면 --force).",
               file=sys.stderr)
-        return 1
+        return 3                                 # 멈춤 - 오류(1 · 2)와 구분(xlwork 리본이 읽음)
     package = read_dsd(args.file)
     side, conf, sheets = _recon_inputs(args, parse_contents(package.contents))
     if not sheets:
