@@ -84,6 +84,22 @@ uv run --no-editable dsdxlsx fill 골격.dsd 8110_최종분석적검토.xlsx --c
 #      섞이면 라벨 '…이익(손실)'. 못 채운 칸(조서에 없는 행 · 후보 값이 다름 · 전기 값이 조서와 다름)은 결과 엑셀에.
 #    재현 시험(작성형 3분기): 반기 최종 DSD + 전년 3분기 DSD + 8110 → 최종본과 숫자 9칸 · 행 1개만 다름(사람 판단).
 
+# 1-1e) 정산표 → DSD 다시 만들기: 뼈대 + 정산표 + 건별 레시피 → 대사 · 검산까지 (2026-10-31 신설)
+uv run --no-editable dsdxlsx build 뼈대.dsd 정산표.xlsx --config _engagement/dsd_recon.json \
+    --recipe _engagement/dsd_build.json [-o 보고서.dsd] [--workdir 중간파일폴더] [--no-check] [--force]
+#    세 층: 뼈대 DSD = 구조(행 · 표 · 문구), 정산표 = 숫자, 레시피 = 둘을 잇는 규칙. DSD 를 손으로 고치지 말고
+#      셋 중 하나를 고친 뒤 다시 build. 정산표가 바뀔 때마다 같은 명령 한 줄.
+#    순서: fill → 레시피(labels · tables · cells · subtotals · paragraphs · keep · unit_suffix) → import → text → recon · check.
+#    레시피 tables = fill 이 못 맞추는 다열 · 그룹 · 중복 이름 표를 정산표 칸으로 덮어씀. 방식 두 가지:
+#      label(행 이름 짝짓기 - 같은 이름은 나온 순서대로, range 는 행 ID 또는 행 이름 글) · order(첫 행부터 rows 순서대로).
+#      열 서식 rate2 · raw · prefix_by_row(외화 'USD 1,800,000'), keep_currency, 칸 하나는 cells 의 template('{D12*100:.2f}').
+#    unit_suffix · keep 은 reference(직전 최종 DSD)의 같은 표 · 행 · 열을 본다('주' · '%' 기호, 바뀌지 않는 값).
+#    빌드 밖 수정 감지: 지난 build 결과를 <출력 폴더>/_build/<이름>.last.dsd 에 두고, 출력 DSD 가 그와 다르면
+#      바뀐 칸을 보여 주고 멈춤(--force 로만 덮음). 숫자는 정산표로, 행 · 표 · 문구는 뼈대로 옮기라는 뜻.
+#    레시피는 고객 시트명 · 행 번호가 들어가므로 건 폴더(_engagement)에만 둔다(저장소에 넣지 않음). 키 설명은 build.py 머리.
+#    재현 시험(2026-10-31, E사 3분기 별도 PA): 건별 덮어쓰기 스크립트를 레시피로 옮겨 build → 당시 빌드 결과와
+#      contents.xml 바이트 동일. 빌드 뒤 원문 패치(자본변동표 소계 줄)를 뼈대로 옮기면 최종본과 바이트 동일.
+
 # 1-1c) DSD ↔ 조서 대사: 재무제표·주석 칸마다 조서(최종분석적검토 · PA 정산표 · 연결정산표)에서 같은 값 찾기
 uv run --no-editable dsdxlsx recon 보고서.dsd 8110_최종분석적검토.xlsx     # → 보고서_조서대사.xlsx
 uv run --no-editable dsdxlsx recon 보고서.dsd 정산표.xlsx --config _engagement/dsd_recon.json --json 요약.json

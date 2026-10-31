@@ -742,6 +742,43 @@ def cmd_fill(args) -> int:
     return 0
 
 
+def cmd_build(args) -> int:
+    from . import build as B
+
+    out = args.out or os.path.splitext(args.file)[0] + "_빌드.dsd"
+    edits = B.outside_edits(out)
+    if edits and not args.force:
+        print(f"멈춤: {out} 이(가) 지난 build 뒤에 직접 고쳐졌습니다 - 다시 만들면 아래 수정이 사라집니다.",
+              file=sys.stderr)
+        for ln in edits[:30]:
+            print(f"  {ln}", file=sys.stderr)
+        print("숫자는 정산표에, 행 · 표 · 문구는 뼈대 DSD 에 옮긴 뒤 다시 build 하세요(그대로 덮으려면 --force).",
+              file=sys.stderr)
+        return 1
+    package = read_dsd(args.file)
+    side, conf, sheets = _recon_inputs(args, parse_contents(package.contents))
+    if not sheets:
+        print("오류: 정산표에서 재무제표 · 주석 시트를 못 찾음 - --config 설정을 확인하세요", file=sys.stderr)
+        return 1
+    recipe = B.load_recipe(args.recipe)
+    rep = B.build(args.file, args.workpaper, out, recipe=recipe, fill_conf=conf, side_sheets=sheets,
+                  workdir=args.workdir)
+    B.save_last_build(out)
+    print(f"build({side}) - " + " · ".join(rep.steps))
+    for w in rep.warnings[:40]:
+        print(f"  [주의] {w}")
+    print(f"\nDSD 저장: {out}")
+    if args.no_check:
+        return 0
+    base = os.path.splitext(out)[0]
+    print("\n── 대사(recon) ──")
+    cmd_recon(argparse.Namespace(file=out, workpaper=args.workpaper, config=args.config, fs_sheets=None,
+                                 note_sheets=None, prior=False, out=base + "_조서대사.xlsx", json_out=None))
+    print("\n── 검산(check) ──")
+    return cmd_check(argparse.Namespace(file=out, only=None, profile=None, json_out=None,
+                                        out=base + "_검증.xlsx"))
+
+
 def main(argv=None) -> int:
     _force_utf8_io()
     ap = argparse.ArgumentParser(
@@ -814,6 +851,20 @@ def main(argv=None) -> int:
     p.add_argument("--report", help="결과 엑셀 경로 (기본: <출력>_채움결과.xlsx)")
     p.add_argument("-o", "--out", help="출력 .dsd (기본: <대상>_채움.dsd)")
     p.set_defaults(func=cmd_fill)
+
+    p = sub.add_parser(
+        "build",
+        help="정산표 → DSD 다시 만들기 - 뼈대 DSD + 정산표 + 건별 레시피(fill · 표 대응 · 단위 기호 · 문단) → 대사 · 검산",
+    )
+    p.add_argument("file", help="뼈대 .dsd (당전기를 밀고 행 구조를 맞춘 것)")
+    p.add_argument("workpaper", help="정산표 엑셀 (계산값 저장된 파일)")
+    p.add_argument("--config", help="건별 설정 JSON(recon · fill 과 같은 파일)")
+    p.add_argument("--recipe", help="빌드 레시피 JSON(_engagement/dsd_build.json) - 표 대응 · 문단 · 유지 · 글 바꾸기")
+    p.add_argument("--force", action="store_true", help="출력 DSD 를 직접 고친 흔적이 있어도 덮어씀")
+    p.add_argument("--no-check", action="store_true", help="빌드 뒤 대사 · 검산 생략")
+    p.add_argument("--workdir", help="중간 파일(채움 · 레시피 엑셀)을 남길 폴더 (기본: 임시 폴더)")
+    p.add_argument("-o", "--out", help="출력 .dsd (기본: <뼈대>_빌드.dsd)")
+    p.set_defaults(func=cmd_build)
 
     p = sub.add_parser(
         "annotate-ai",
