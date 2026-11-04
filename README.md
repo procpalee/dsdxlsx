@@ -345,7 +345,7 @@ AUTOSUM(자동합계) 셀이 있는 표를 수정하면 경고가 출력된다 -
 |---|---|
 | `OPENDART_API_KEY` | `roll-interim`의 OpenDART 전기 값 대사(`--no-dart`로 끔). 환경변수가 없으면 저장소 루트나 실행 폴더의 `.env`에서 읽는다 |
 | `KICPA_FORMS` | `disc`의 한공회 표준조서 서식 폴더(`--kicpa-dir`를 주면 그쪽이 먼저) |
-| `DSDXLSX_AUTHOR` | `recon` 대사 결과와 `fill` 채움 결과 엑셀의 파일 속성 '만든 이'. 없으면 excel-theme 스킬의 `AUTHOR`(`EXCEL_AUTHOR`)를 쓰고, 스킬도 없으면 그대로 둔다 |
+| `DSDXLSX_AUTHOR` | 새로 만드는 출력 엑셀(`export`, `check -o` 보고서, `rollforward`·`roll-interim`·`build` 결과, `recon`, `fill`, `disc`)의 파일 속성 '만든 이'. 없으면 excel-theme 스킬의 `AUTHOR`(`EXCEL_AUTHOR`)를 쓰고, 스킬도 없으면 그대로 둔다. 이미 있는 엑셀에 적는 `check`·`refoot`·`annotate-ai`는 만든 이를 바꾸지 않는다 |
 
 ## 개발
 

@@ -164,6 +164,8 @@ def write_report(report: CheckReport, out_path: str, target_xlsx: str | None = N
 
     if _T.get("modernize"):
         _T["modernize"](wb)
+    from .theme import set_author
+    set_author(wb)
     wb.save(out_path)
     bad = sum(1 for x in report.results if not x.ok)
     return {"results": len(report.results), "bad": bad}

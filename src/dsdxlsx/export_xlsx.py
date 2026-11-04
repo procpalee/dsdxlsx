@@ -22,7 +22,7 @@ from openpyxl.utils import get_column_letter
 from . import grid as grid_mod
 from . import numbers
 from .model import Block, Document, Node, Table
-from .theme import load_theme
+from .theme import load_theme, set_author
 
 MAP_SHEET = "_map"
 MAP_CHUNK = 32000  # 셀당 32,767자 제한 대비
@@ -357,5 +357,6 @@ def export_xlsx(doc: Document, dsd_bytes: bytes, dsd_name: str, out_path: str) -
 
     if _T.get("modernize"):
         _T["modernize"](wb)
+    set_author(wb)
     wb.save(out_path)
     return stats

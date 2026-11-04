@@ -507,6 +507,8 @@ def run(review: dict, out: Path, form: str | None = None, kicpa_dir: str | None 
             y_rows += 1
 
     _write_result_sheet(wb, items, ev, form, name, pe)
+    from .theme import set_author
+    set_author(wb)
     wb.save(out)
     cnt = {v: sum(1 for i in items if i.verdict == v) for v in (VERDICT_Y, VERDICT_NA, VERDICT_Q)}
     unmatched = _unmatched_notes(items, ev)
