@@ -808,6 +808,8 @@ def main(argv=None) -> int:
         prog="dsdxlsx",
         description="DART DSD ↔ XLSX 왕복 변환 (무수정 부분 바이트 보존)",
     )
+    from . import __version__
+    ap.add_argument("--version", action="version", version=f"dsdxlsx {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("export", help="DSD → XLSX 내보내기")

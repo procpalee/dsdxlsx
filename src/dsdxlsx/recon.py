@@ -1049,6 +1049,7 @@ def write_recon_report(rep: ReconReport, out_path: str, dsd_path: str, wp_path: 
     from .export_xlsx import _T
     if _T.get("modernize"):
         _T["modernize"](wb)
-    wb.properties.creator = "이재현"
+    from .theme import set_author
+    set_author(wb)
     wb.save(out_path)
     return {"items": len(rep.items), "issues": n_issue}

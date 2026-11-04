@@ -6,6 +6,7 @@ openpyxl 저장 테마도 최신 Office 테마로 교체된다(스킬의 설계)
 """
 from __future__ import annotations
 
+import functools
 import importlib.util
 import os
 
@@ -64,6 +65,28 @@ def load_theme() -> dict:
         colors["accent"] = c.get("accent", colors["accent"])
         colors["title_color"] = c.get("title_color", colors["title_color"])
         theme["modernize"] = getattr(mod, "modernize_theme", None)
+        theme["author"] = getattr(mod, "AUTHOR", None)
     except Exception:
         pass  # 스킬 미설치 환경 — 폴백 사용
     return theme
+
+
+@functools.lru_cache(maxsize=None)
+def _skill_author() -> str | None:
+    return load_theme().get("author")
+
+
+def author() -> str | None:
+    """출력 엑셀의 '만든 이'. 환경변수 DSDXLSX_AUTHOR > excel-theme 스킬의 AUTHOR(EXCEL_AUTHOR) > 없음.
+
+    없으면 None 이고, 부르는 쪽은 만든 이를 건드리지 않는다(openpyxl 기본값).
+    """
+    env = os.environ.get("DSDXLSX_AUTHOR", "").strip()
+    return env or _skill_author() or None
+
+
+def set_author(wb) -> None:
+    """통합문서 만든 이를 author() 로(값이 없으면 그대로 둔다)."""
+    name = author()
+    if name:
+        wb.properties.creator = name

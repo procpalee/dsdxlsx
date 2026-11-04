@@ -285,6 +285,14 @@ AUTOSUM(자동합계) 셀이 있는 표를 수정하면 경고가 출력된다 �
 - import는 openpyxl **read_only 모드**로 읽는다 — 일반 모드는 행 삽입 후 어긋난 병합
   범위가 셀 값을 가려(MergedCell) 데이터 소실 오검출을 일으킨다.
 
+## 설정(환경변수)
+
+| 환경변수 | 쓰는 곳 |
+|---|---|
+| `OPENDART_API_KEY` | `roll-interim`의 OpenDART 전기 값 대사(`--no-dart`로 끔). 환경변수가 없으면 저장소 루트나 실행 폴더의 `.env`에서 읽는다 |
+| `KICPA_FORMS` | `disc`의 한공회 표준조서 서식 폴더(`--kicpa-dir`를 주면 그쪽이 먼저) |
+| `DSDXLSX_AUTHOR` | `recon` 대사 결과와 `fill` 채움 결과 엑셀의 파일 속성 '만든 이'. 없으면 excel-theme 스킬의 `AUTHOR`(`EXCEL_AUTHOR`)를 쓰고, 스킬도 없으면 그대로 둔다 |
+
 ## 개발
 
 ```powershell
@@ -298,5 +306,9 @@ uv sync --no-editable --reinstall-package dsdxlsx
 
 CI/신규 클론용 합성 픽스처: `tests/fixtures/factory.py` — 실측 관례를 흉내 낸 가짜
 회사 미니 DSD를 코드로 조립한다(고객 데이터 불필요). 프로파일·대사맵 테스트가 사용.
+
+GitHub Actions(`.github/workflows/test.yml`)가 main push와 PR마다 Windows에서 Python 3.11과 3.13으로 같은 시험을 돌린다. 저장소에는 샘플 DSD가 없으므로 샘플이 필요한 시험은 건너뛴다.
+
+커밋 전 고객사명 검사: 이 PC에서는 `.git/hooks/pre-commit`이 `Projects\_tools\check_client_names.py`를 부른다(훅은 저장소에 올라가지 않으므로 새로 clone 하면 다시 설치한다).
 
 ⚠ 샘플 DSD·xlsx는 고객 실데이터 — `.gitignore`로 제외됨. 커밋 금지.

@@ -476,5 +476,6 @@ def write_fill_report(rep: FillReport, out_path: str, dsd_path: str, wp_path: st
                     cell.number_format = _NUMFMT if v == int(v) else "#,##0.00"
                 if x.verdict == "못 채움":
                     cell.fill = _FILL_BAD
-    wb.properties.creator = "이재현"
+    from .theme import set_author
+    set_author(wb)
     wb.save(out_path)
