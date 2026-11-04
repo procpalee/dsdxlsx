@@ -52,7 +52,10 @@ dsdxlsx --version
 - `dsdxlsx` 명령을 찾지 못하면 `uv tool update-shell`을 한 번 실행하고 터미널을 새로 연다.
 - 새 버전으로 바꾸기: `uv tool install --force git+https://github.com/procpalee/dsdxlsx@v<새 버전>` (버전 목록은 [Releases](https://github.com/procpalee/dsdxlsx/releases)와 `CHANGELOG.md`).
 - 지우기: `uv tool uninstall dsdxlsx`
-- 끌어다 놓아 실행하는 `.cmd` 파일(`DSD to XLSX.cmd` 등)은 저장소 폴더 안에서 `uv run`으로 돈다. 쓰려면 저장소를 내려받고(`git clone` 또는 GitHub의 Download ZIP) 그 폴더의 `.cmd`를 쓴다.
+- 끌어다 놓아 실행하는 `.cmd` 파일(`DSD to XLSX.cmd` 등)은 저장소 폴더 안에서 `uv run`으로 돈다. 쓰려면 저장소를 내려받고(`git clone` 또는 GitHub의 Download ZIP) 그 폴더의 `.cmd`에 파일을 끌어다 놓는다. 처음 한 번은 실행 환경을 만드느라 몇 초 더 걸린다.
+  - uv가 없으면 `.cmd`가 설치 명령을 보여 주고 멈춘다.
+  - ZIP으로 받았다면 압축을 풀기 전에 ZIP 파일의 속성에서 '차단 해제'를 켠다. 그대로 풀면 `.cmd`를 열 때마다 Windows 보안 경고가 뜬다.
+  - 폴더 이름과 파일 이름에 한글, 공백, 괄호가 있어도 된다.
 - 엑셀 서식은 excel-theme 스킬이 있으면 그 테마를, 없으면 내장 서식을 쓴다.
 
 ## 사용법

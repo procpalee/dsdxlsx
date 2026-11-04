@@ -1,6 +1,6 @@
 @echo off
-chcp 65001 >nul
 cd /d "%~dp0"
+where uv >nul 2>nul || goto :nouv
 if "%~1"=="" goto :usage
 set "PRIOR_SAME="
 set "PRIOR_ANNUAL="
@@ -13,6 +13,7 @@ set /p PRIOR_ANNUAL= "   prior audit report .dsd path (Enter to skip): "
 set "ARGS="
 if not "%PRIOR_SAME%"=="" set ARGS=%ARGS% --prior-same "%PRIOR_SAME:"=%"
 if not "%PRIOR_ANNUAL%"=="" set ARGS=%ARGS% --prior-annual "%PRIOR_ANNUAL:"=%"
+chcp 65001 >nul
 uv run --no-editable dsdxlsx roll-interim "%~1" %ARGS%
 echo.
 pause
@@ -24,3 +25,13 @@ echo  Creates: ^<name^>_dang-jeon-gi-mil-gi.dsd + .xlsx (next-quarter DSD: curre
 echo  OPENDART_API_KEY in .env enables DART comparison (listed companies).
 echo.
 pause
+exit /b 0
+
+:nouv
+echo.
+echo  uv is not installed. Install it once in PowerShell, then open a new window:
+echo    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+echo  See README: https://github.com/procpalee/dsdxlsx
+echo.
+pause
+exit /b 1

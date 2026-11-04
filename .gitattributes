@@ -1,0 +1,2 @@
+# 끌어다 놓는 실행 파일은 받는 PC 설정과 무관하게 CRLF 로 (LF 면 cmd 의 goto 라벨 찾기가 어긋날 수 있다)
+*.cmd text eol=crlf
