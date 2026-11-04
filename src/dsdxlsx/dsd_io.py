@@ -59,12 +59,16 @@ class _RawNameInfo(zipfile.ZipInfo):
     Python zipfile은 비ASCII 파일명을 무조건 UTF-8(+flag 0x800)로 다시 쓰지만,
     DART 편집기가 만든 zip은 첨부 이미지의 한글 이름을 cp949(플래그 없음)로
     저장한다. 재패킹에서 이름 바이트가 바뀌면 meta.xml의 IMG 참조와 어긋나
-    편집기가 파일 열기를 거부한다 (실측 — 날인 이미지 동봉 문서)."""
+    편집기가 파일 열기를 거부한다 (실측 — 날인 이미지 동봉 문서).
+
+    UTF-8 플래그(0x800)는 원본 값만 쓴다. Python 3.13 최신판은 쓰기 전에
+    flag_bits 에 0x800 을 미리 켜 두므로, 그대로 OR 하면 cp949 이름 바이트에
+    UTF-8 플래그가 붙어 다시 읽을 수 없는 zip 이 된다."""
 
     def _encodeFilenameFlags(self):
         raw = getattr(self, "_raw_name", None)
         if raw is not None:
-            return raw, self.flag_bits | self._raw_encoding_flag
+            return raw, (self.flag_bits & ~0x800) | self._raw_encoding_flag
         return super()._encodeFilenameFlags()
 
 
