@@ -1,4 +1,4 @@
-"""dsdxlsx CLI: export / import / verify."""
+"""dsdxlsx CLI: export / import / verify / diff …"""
 from __future__ import annotations
 
 import argparse
@@ -781,6 +781,26 @@ def cmd_build(args) -> int:
                                         out=base + "_검증.xlsx"))
 
 
+def cmd_diff(args) -> int:
+    from . import diffview as D
+
+    docs = [parse_contents(read_dsd(f).contents) for f in (args.a, args.b)]
+    base = parse_contents(read_dsd(args.base).contents) if args.base else None
+    names = [x.strip() for x in (args.labels or "").split(",") if x.strip()]
+    stem = lambda f: os.path.splitext(os.path.basename(f))[0]
+    labels = (names[0] if len(names) > 0 else "A", names[1] if len(names) > 1 else "B",
+              (names[2] if len(names) > 2 else "기준") if args.base else None)
+    changes = D.compare(docs[0], docs[1], base)
+    out = args.out or os.path.join(os.path.dirname(os.path.abspath(args.b)), f"{stem(args.a)}_vs_{stem(args.b)}_비교.html")
+    with open(out, "w", encoding="utf-8") as f:
+        f.write(D.render_html(changes, labels, (os.path.basename(args.a), os.path.basename(args.b),
+                                                os.path.basename(args.base) if args.base else None)))
+    s = D.summary(changes)
+    print(f"바뀐 곳 {s['total']}건 - " + " · ".join(f"{D.KINDS[k][0]} {n}" for k, n in s["by_kind"].items()))
+    print(f"보고서: {out}")
+    return 0
+
+
 def main(argv=None) -> int:
     _force_utf8_io()
     ap = argparse.ArgumentParser(
@@ -798,6 +818,14 @@ def main(argv=None) -> int:
     p.add_argument("xlsx")
     p.add_argument("-o", "--out")
     p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("diff", help="두 DSD 의 보이는 차이를 HTML 보고서로(주석별 · 종류별, 바뀐 칸 · 글자 칠함)")
+    p.add_argument("a", help="비교 기준 DSD(예: 우리 판)")
+    p.add_argument("b", help="비교 대상 DSD(예: 감사인이 고친 판)")
+    p.add_argument("--base", help="기준 DSD(예: 직전 분기 최종) - 바뀐 곳이 이어받은 것인지 표시")
+    p.add_argument("--labels", help="이름 'A,B[,기준]' (예: 우리 v1.6,감사인,2Q 최종)")
+    p.add_argument("-o", "--out", help="저장 경로(기본: B 폴더에 <A>_vs_<B>_비교.html)")
+    p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser("verify", help="두 DSD 파일 구조 비교")
     p.add_argument("a")

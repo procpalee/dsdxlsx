@@ -145,6 +145,9 @@ uv run --no-editable dsdxlsx import 보고서.xlsx           # → 보고서_수
 
 # 4) 변경 내역 비교
 uv run --no-editable dsdxlsx verify 원본.dsd 수정본.dsd
+#    보이는 차이를 HTML 한 장으로(주석별 · 종류별, 바뀐 칸 · 글자 칠함, 거르기 단추)
+#    --base 에 직전 분기 최종 DSD 를 주면 바뀐 곳마다 기준을 이어받은 것인지 · 새로 생긴 줄인지 표시
+uv run --no-editable dsdxlsx diff 우리.dsd 감사인.dsd --base 직전최종.dsd --labels "우리,감사인,직전 최종" -o 비교.html
 
 # 5) 정합성 검증 (수정 후 필수 — DART 편집기는 본문 합계를 자동 재계산하지 않음)
 uv run --no-editable dsdxlsx check 편집한파일.xlsx      # 저장한 편집 상태 그대로 검사
