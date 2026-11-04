@@ -1,13 +1,33 @@
-# dsdxlsx — DART DSD ↔ XLSX 왕복 변환
+# dsdxlsx - DART DSD ↔ XLSX 왕복 변환
 
 DART 전자공시 제출용 DSD 파일(= ZIP: contents.xml + meta.xml)을 엑셀로 내보내
 편집한 뒤 다시 DSD로 재변환하는 CLI. **수정하지 않은 부분은 바이트 수준으로 보존**한다
 (무수정 왕복 = contents.xml sha256 동일).
 
+## 설치
+
+Windows에서 [uv](https://docs.astral.sh/uv/)로 설치한다. Python(3.11 이상)은 uv가 알아서 받는다.
+
+```powershell
+# uv가 없으면 먼저 설치 (설치 뒤 터미널을 새로 연다)
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+
+# dsdxlsx 설치 - 버전을 태그로 고정
+uv tool install git+https://github.com/procpalee/dsdxlsx@v0.2.0
+dsdxlsx --version
+```
+
+- 설치하면 어느 폴더에서나 `dsdxlsx export 보고서.dsd`처럼 바로 쓴다. 아래 사용법의 `uv run --no-editable dsdxlsx …`는 저장소를 내려받아 그 폴더에서 쓸 때의 형태이고, 설치본에서는 앞의 `uv run --no-editable`을 빼면 된다.
+- `dsdxlsx` 명령을 찾지 못하면 `uv tool update-shell`을 한 번 실행하고 터미널을 새로 연다.
+- 새 버전으로 바꾸기: `uv tool install --force git+https://github.com/procpalee/dsdxlsx@v<새 버전>` (버전 목록은 [Releases](https://github.com/procpalee/dsdxlsx/releases)와 `CHANGELOG.md`).
+- 지우기: `uv tool uninstall dsdxlsx`
+- 끌어다 놓아 실행하는 `.cmd` 파일(`DSD to XLSX.cmd` 등)은 저장소 폴더 안에서 `uv run`으로 돈다. 쓰려면 저장소를 내려받고(`git clone` 또는 GitHub의 Download ZIP) 그 폴더의 `.cmd`를 쓴다.
+- 엑셀 서식은 excel-theme 스킬이 있으면 그 테마를, 없으면 내장 서식을 쓴다.
+
 ## 사용법
 
 ```powershell
-# 이 폴더에서 (uv 필요; 한글 경로 editable 함정 때문에 --no-editable 필수)
+# 저장소 폴더에서 쓸 때 (uv 필요; 한글 경로 editable 함정 때문에 --no-editable 필수)
 uv sync --no-editable
 
 # 1) DSD → 엑셀  (또는 .dsd를 'DSD to XLSX.cmd'에 드래그&드롭)
