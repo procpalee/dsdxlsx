@@ -17,6 +17,7 @@ DART 전자공시 편집기 문서(DSD)를 엑셀로 열어 고치고 다시 DSD
 | DSD 숫자를 조서(최종분석적검토, 정산표)와 칸마다 맞춰 본다 | `recon` |
 | 한공회 공시사항점검표의 해당 여부와 주석 번호를 채운다 | `disc` |
 | 엑셀 없이 DSD를 읽고(마크다운·JSON) JSON 편집 목록으로 고친다. LLM이나 스크립트가 쓰기 좋다 | `inspect`, `apply` |
+| DART에 공시된 감사보고서를 받아 DSD로 만든다. 엑셀과 당기 작성용 기초 DSD까지 한 번에 | `dart` |
 
 ## 화면 예시
 
@@ -267,6 +268,25 @@ xlsx를 check하면 검증 결과가 **그 파일 안에 살아있는 엑셀 수
 xlsx check는 임베드 원본이 아니라 **현재 편집 상태**(저장된 셀 수정·행 추가 반영)를 검사한다.
 `.dsd`를 check하면 콘솔 출력만, `-o 파일.xlsx`로 별도 리포트 저장 가능.
 
+### dart - DART 공시 감사보고서를 DSD로
+
+전기 DSD가 없는 신규 감사 건이나, 공시본과 우리 판을 비교할 때 쓴다. OpenDART 키가 필요하다(아래 "설정").
+
+```powershell
+dsdxlsx dart 샘플전자 --list                      # 고를 수 있는 공시 목록
+dsdxlsx dart 샘플전자 --year 2025                 # → 샘플전자_감사보고서_2025.dsd
+dsdxlsx dart 005930 --form 연결감사 --xlsx        # 종목코드로, 연결감사보고서 + 편집용 엑셀
+dsdxlsx dart "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=20260310000001" --rollforward
+#    --rollforward: 당기 작성용 기초 DSD·정산표(_차기기초)도 만든다(rollforward 와 같음)
+```
+
+- 회사는 회사명, 종목코드(6자리), 고유번호(8자리)로, 공시는 DART 주소나 접수번호(14자리)로 가리킨다.
+- 감사보고서는 외부감사관련 공시(감사보고서 제출)에서 먼저 찾고, 없으면 사업보고서에 첨부된 감사보고서를 쓴다.
+- 공시 원문 XML을 그대로 DSD 본문으로 쓴다. 고치는 것은 이스케이프 안 된 `&`·`<`와 줄끝(LF → DART 편집기의 CRLF, `--keep-lf`로 끔)뿐이다.
+- 공시 원문에는 이미지 파일이 없어 자리만 남는다. 결과에 이미지 목록이 나오니 DART 편집기에서 다시 넣는다.
+- 지금은 감사보고서(별도·연결)만 받는다. 감사전 재무제표나 분·반기 검토보고서 서식으로 바꾸는 기능은 아직 없다.
+- 만든 DSD는 제출용으로 쓰기 전에 DART 편집기로 열어 확인한다.
+
 ### inspect·apply - 엑셀 없이 읽고 고치기 (LLM·스크립트용)
 
 LLM 에이전트나 스크립트는 엑셀을 열기 어렵다. `inspect`로 문서를 글로 읽고, `apply`로 JSON 편집 목록을 반영한다.
@@ -383,7 +403,7 @@ AUTOSUM(자동합계) 셀이 있는 표를 수정하면 경고가 출력된다 -
 
 | 환경변수 | 쓰는 곳 |
 |---|---|
-| `OPENDART_API_KEY` | `roll-interim`의 OpenDART 전기 값 대사(`--no-dart`로 끔). 환경변수가 없으면 저장소 루트나 실행 폴더의 `.env`에서 읽는다 |
+| `OPENDART_API_KEY` | `dart`의 공시 원문 받기, `roll-interim`의 OpenDART 전기 값 대사(`--no-dart`로 끔). 환경변수가 없으면 저장소 루트나 실행 폴더의 `.env`에서 읽는다. 키는 opendart.fss.or.kr에서 발급한다 |
 | `KICPA_FORMS` | `disc`의 한공회 표준조서 서식 폴더(`--kicpa-dir`를 주면 그쪽이 먼저) |
 | `DSDXLSX_AUTHOR` | 새로 만드는 출력 엑셀(`export`, `check -o` 보고서, `rollforward`·`roll-interim`·`build` 결과, `recon`, `fill`, `disc`)의 파일 속성 '만든 이'. 없으면 excel-theme 스킬의 `AUTHOR`(`EXCEL_AUTHOR`)를 쓰고, 스킬도 없으면 그대로 둔다. 이미 있는 엑셀에 적는 `check`·`refoot`·`annotate-ai`는 만든 이를 바꾸지 않는다 |
 

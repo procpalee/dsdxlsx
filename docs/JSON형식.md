@@ -112,4 +112,22 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | 3 | 안전 장치로 멈춤(출력 파일이 이미 있음, 입력 파일 자리에 쓰기). 아무것도 쓰지 않음 |
 
 `changes`의 키: `cell_edits`, `row_inserts`, `row_deletes`, `table_inserts`, `table_deletes`, `para_inserts`, `para_deletes`, `autosum_tables`.
+
+### dart 결과
+
+```json
+{"schema": "dsdxlsx.result/1", "command": "dart", "ok": true, "exit_code": 0,
+ "outputs": ["샘플전자_감사보고서_2025.dsd", "샘플전자_감사보고서_2025.xlsx"],
+ "warnings": ["이미지 1개는 공시 원문에 파일이 없어 자리만 남았다 - …"], "errors": [],
+ "company": "샘플전자 주식회사", "corp_code": "00999001", "year": 2025,
+ "source": {"rcept_no": "20260310000001", "rcept_dt": "20260310", "report_nm": "감사보고서 (2025.12)",
+            "period": "2025.12", "kind": "F", "url": "https://dart.fss.or.kr/dsaf001/main.do?rcpNo=…",
+            "file": "20260310000001.xml", "acode": "00760", "document": "감사보고서"},
+ "fixes": {"crlf": 7618}, "images": ["….jpg"],
+ "rollforward": {"자동확정": 49, "확인필요": 34, "미처리": 6, "painted": 355}}
+```
+
+`source.kind`는 `F`(외부감사관련 공시) 또는 `A`(사업보고서 첨부)다. 접수번호로 받으면 공시 정보가 없어 `rcept_no`가 `null`이다.
+`rollforward`는 `--rollforward`를 줬을 때만 있다. `--list --json`은 `corp`(고유번호·회사명·종목코드)와 `filings`(공시 목록)를 낸다.
+키가 없거나 회사·공시를 못 찾으면 종료코드 2, 출력 파일이 이미 있으면 3이다.
 `structural`이 `true`면 ID가 다시 매겨졌으니 다음 편집 전에 `inspect`를 다시 한다.

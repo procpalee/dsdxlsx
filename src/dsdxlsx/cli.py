@@ -143,6 +143,103 @@ def cmd_apply(args) -> int:
     return R.OK
 
 
+def cmd_dart(args) -> int:
+    """DART 에 공시된 감사보고서 → DSD (+ 엑셀, 롤포워드)."""
+    import re
+
+    from . import dartdoc as D
+    from . import result as R
+
+    def fail(code: int, msg: str) -> int:
+        if args.json:
+            return R.emit(R.envelope("dart", code, errors=[msg]))
+        print(f"오류: {msg}", file=sys.stderr)
+        return code
+
+    try:
+        if args.list:
+            corp = D.find_corp(args.query)
+            fl = D.filings(corp, args.form, args.year)
+            if args.json:
+                return R.emit(R.envelope("dart", R.OK, corp={"code": corp.code, "name": corp.name,
+                                                            "stock": corp.stock},
+                                         filings=[f.to_dict() for f in fl]))
+            print(f"{corp.name} ({corp.stock or '비상장'}, 고유번호 {corp.code}) - "
+                  f"{D.ACODE_NAMES[D.FORMS[args.form]]}이 들어 있을 공시 {len(fl)}건")
+            for f in fl:
+                where = "외부감사관련" if f.kind == "F" else "사업보고서 첨부"
+                print(f"  {f.rcept_no}  {f.rcept_dt}  {f.report_nm}  [{where}]")
+            return R.OK
+        got = D.fetch(args.query, args.form, args.year, crlf=not args.keep_lf)
+    except D.DartError as e:
+        return fail(R.INPUT_ERROR, str(e))
+
+    b = got.built
+    try:
+        parse_contents(b.contents)
+    except DsdParseError as e:
+        return fail(R.INPUT_ERROR, f"공시 원문을 DSD 본문으로 읽지 못했다 - {e}")
+    m = re.search(rb'AUNIT="PERIODTO"[^>]*AUNITVALUE="(\d{4})', b.contents)
+    year = got.filing.year if got.filing and got.filing.year else (int(m.group(1)) if m else None)
+    stem = re.sub(r'[\\/:*?"<>|]', "_", f"{b.company or b.corp_code}_{D.ACODE_NAMES[b.acode]}"
+                  + (f"_{year}" if year else ""))
+    if args.out and os.path.isdir(args.out):
+        out = os.path.join(args.out, stem + ".dsd")
+    else:
+        out = args.out or stem + ".dsd"
+    targets = [out] + ([os.path.splitext(out)[0] + ".xlsx"] if args.xlsx else [])
+    if args.rollforward:
+        rb = os.path.splitext(out)[0] + "_차기기초"
+        targets += [rb + ".dsd", rb + ".xlsx"]
+    if not args.force:
+        exists = [t for t in targets if os.path.exists(t)]
+        if exists:
+            return fail(R.STOPPED, "이미 있는 파일: " + ", ".join(exists) + " - 다른 -o 를 주거나 --force")
+
+    D.write_dsd(out, b)
+    outputs = [out]
+    warnings = []
+    if b.images:
+        warnings.append(f"이미지 {len(b.images)}개는 공시 원문에 파일이 없어 자리만 남았다 - "
+                        "DART 편집기에서 다시 넣으라: " + ", ".join(b.images[:5])
+                        + (" …" if len(b.images) > 5 else ""))
+    if b.fixes.get("escaped"):
+        warnings.append(f"원문의 이스케이프 안 된 '&'·'<' {b.fixes['escaped']}곳을 고쳤다")
+    if args.xlsx:
+        from .export_xlsx import export_xlsx
+        xo = os.path.splitext(out)[0] + ".xlsx"
+        with open(out, "rb") as f:
+            export_xlsx(parse_contents(b.contents), f.read(), out, xo)
+        outputs.append(xo)
+    roll = None
+    if args.rollforward:
+        rd, rx, rep, n_paint = run_rollforward(out)
+        outputs += [rd, rx]
+        roll = {"자동확정": rep.count("자동확정"), "확인필요": rep.count("확인필요"),
+                "미처리": rep.count("미처리"), "painted": n_paint}
+    src = got.filing.to_dict() if got.filing else {"rcept_no": None}
+    src.update({"file": got.part.filename, "acode": b.acode, "document": got.part.name})
+    if args.json:
+        return R.emit(R.envelope("dart", R.OK, outputs=outputs, warnings=warnings,
+                                 company=b.company, corp_code=b.corp_code, year=year,
+                                 source=src, fixes=b.fixes, images=b.images, rollforward=roll))
+    print(f"DSD 저장: {out}")
+    if got.filing:
+        print(f"  원천: {got.filing.report_nm} 접수번호 {got.filing.rcept_no} ({got.filing.rcept_dt}) "
+              f"- {got.part.name}")
+    for o in outputs[1:]:
+        print(f"  저장: {o}")
+    if b.fixes.get("crlf"):
+        print("  줄끝을 DART 편집기 형식(CRLF)으로 맞췄다(--keep-lf 로 원문 그대로)")
+    if roll:
+        print(f"  롤포워드: 자동확정 {roll['자동확정']}건 / 확인필요 {roll['확인필요']}건 / "
+              f"미처리 {roll['미처리']}건 - '롤포워드' 시트에서 처리")
+    for w in warnings:
+        print(f"  [경고] {w}")
+    print("  최종 확인: 만든 DSD 를 DART 편집기로 열어 보라")
+    return R.OK
+
+
 def cmd_verify(args) -> int:
     for line in diff_dsd(args.a, args.b):
         print(line)
@@ -348,27 +445,27 @@ def cmd_refoot(args) -> int:
     return 0
 
 
-def cmd_rollforward(args) -> int:
-    """전기 DSD → 당기 기초 DSD + 표준 정산표(xlsx, '롤포워드' 리포트 시트 포함)."""
+def run_rollforward(dsd_path: str, out: str | None = None, profile_name: str | None = None):
+    """전기 DSD → 당기 기초 DSD + 표준 정산표. (out_dsd, out_xlsx, report, n_paint)."""
     from . import rollforward as rf
     from . import splice
     from .export_xlsx import export_xlsx
     from .profile import resolve_profile
 
-    package = read_dsd(args.dsd)
+    package = read_dsd(dsd_path)
     doc = parse_contents(package.contents)
     try:
         meta = package.meta
     except FileNotFoundError:
         meta = None
-    profile = resolve_profile(meta, getattr(args, "profile", None))
+    profile = resolve_profile(meta, profile_name)
 
     ops, report = rf.roll_ops(doc, profile)
     rolled = splice.apply(package.contents, ops)
     parse_contents(rolled)  # well-formedness
 
-    base = os.path.splitext(args.out or args.dsd)[0]
-    if not args.out:
+    base = os.path.splitext(out or dsd_path)[0]
+    if not out:
         base += "_차기기초"
     out_dsd, out_xlsx = base + ".dsd", base + ".xlsx"
     write_dsd(out_dsd, package, rolled)
@@ -382,6 +479,13 @@ def cmd_rollforward(args) -> int:
         n_paint = rf.paint_moved(out_xlsx, doc2, report.painted,
                                  imp2.row_positions)
     rf.write_roll_sheet(out_xlsx, report)
+    return out_dsd, out_xlsx, report, n_paint
+
+
+def cmd_rollforward(args) -> int:
+    """전기 DSD → 당기 기초 DSD + 표준 정산표(xlsx, '롤포워드' 리포트 시트 포함)."""
+    out_dsd, out_xlsx, report, n_paint = run_rollforward(
+        args.dsd, args.out, getattr(args, "profile", None))
 
     print(f"롤포워드 완료: {out_xlsx} (당기 기초 DSD: {out_dsd})")
     if n_paint:
@@ -911,6 +1015,21 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="출력 파일이 있어도 덮어씀")
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(종료코드 0/2/3)")
     p.set_defaults(func=cmd_apply)
+
+    p = sub.add_parser("dart", help="DART 에 공시된 감사보고서를 DSD 로(+ 엑셀·롤포워드, OpenDART 키 필요)")
+    p.add_argument("query", help="회사명·종목코드(6자리)·고유번호(8자리)·DART 공시 주소·접수번호(14자리)")
+    p.add_argument("--form", choices=["감사", "연결감사"], default="감사",
+                   help="감사(별도) 또는 연결감사(기본: 감사)")
+    p.add_argument("--year", type=int, help="사업연도(기본: 가장 최근 공시)")
+    p.add_argument("--list", action="store_true", help="받지 않고 고를 수 있는 공시만 보여 줌")
+    p.add_argument("-o", "--out", help="출력 DSD 경로나 폴더(기본: 현재 폴더 <회사>_<서식>_<연도>.dsd)")
+    p.add_argument("--xlsx", action="store_true", help="같은 이름의 편집용 엑셀도 만듦(export)")
+    p.add_argument("--rollforward", action="store_true",
+                   help="당기 작성용 기초 DSD·정산표도 만듦(rollforward, _차기기초)")
+    p.add_argument("--keep-lf", action="store_true", help="줄끝을 원문(LF) 그대로 둠(기본: CRLF)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 있어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(종료코드 0/2/3)")
+    p.set_defaults(func=cmd_dart)
 
     p = sub.add_parser("diff", help="두 DSD 의 보이는 차이를 HTML 보고서로(두 판 나란히 보기 + 바뀐 곳만 카드)")
     p.add_argument("a", help="비교 기준 DSD(예: 우리 판)")
