@@ -16,6 +16,7 @@ DART 전자공시 편집기 문서(DSD)를 엑셀로 열어 고치고 다시 DSD
 | 직전 분·반기 DSD로 다음 분기 DSD를 만들고, 당기 칸을 조서에서 채운다 | `roll-interim`, `fill`, `build` |
 | DSD 숫자를 조서(최종분석적검토, 정산표)와 칸마다 맞춰 본다 | `recon` |
 | 한공회 공시사항점검표의 해당 여부와 주석 번호를 채운다 | `disc` |
+| 엑셀 없이 DSD를 읽고(마크다운·JSON) JSON 편집 목록으로 고친다. LLM이나 스크립트가 쓰기 좋다 | `inspect`, `apply` |
 
 ## 화면 예시
 
@@ -265,6 +266,45 @@ xlsx를 check하면 검증 결과가 **그 파일 안에 살아있는 엑셀 수
 
 xlsx check는 임베드 원본이 아니라 **현재 편집 상태**(저장된 셀 수정·행 추가 반영)를 검사한다.
 `.dsd`를 check하면 콘솔 출력만, `-o 파일.xlsx`로 별도 리포트 저장 가능.
+
+### inspect·apply - 엑셀 없이 읽고 고치기 (LLM·스크립트용)
+
+LLM 에이전트나 스크립트는 엑셀을 열기 어렵다. `inspect`로 문서를 글로 읽고, `apply`로 JSON 편집 목록을 반영한다.
+`apply`는 `import`와 같은 쓰기 경로와 안전장치(고정 표, 병합 행, 자동 필드, 재배열 금지 등)를 쓴다.
+형식 전체는 [docs/JSON형식.md](docs/JSON형식.md)에 있다.
+
+```powershell
+dsdxlsx inspect 보고서.dsd --section 4          # 주석 4만 마크다운으로
+dsdxlsx inspect 보고서.dsd --json -o 보고서.json  # 전체를 JSON으로
+dsdxlsx apply 보고서.dsd edits.json --dry-run    # 바뀔 내용만 보기
+dsdxlsx apply 보고서.dsd edits.json --json       # 반영 → 보고서_수정.dsd, 결과는 JSON
+dsdxlsx check 보고서_수정.dsd                    # 검산
+```
+
+`inspect` 마크다운의 표는 이렇게 나온다. 행 ID와 열 번호(`[1]`)로 칸을 가리킨다.
+
+```
+[t003 / 단위 백만원]
+| 행 ID | [0] 구  분 | [1] 당기말 (당기) | [2] 전기말 (전기) |
+| t003.r004 | 보통예금 | 1,100 | 750 |
+| t003.r005 합계 | 합  계 | 1,200 | 900 |
+```
+
+`edits.json` 예시(주석 4 보통예금을 고치고 그 아래에 행 하나를 넣는다):
+
+```json
+{"edits": [
+  {"op": "set", "section": "4", "row": "보통예금", "col": "당기", "value": 950},
+  {"op": "insert_row", "after": {"section": "4", "row": "보통예금"},
+   "values": {"구분": "외화예금", "당기말": 50, "전기말": 0}}
+]}
+```
+
+- 편집 종류: `set`(칸 값), `set_text`(문단), `insert_row`·`delete_row`, `insert_para`·`delete_para`, `insert_table`·`delete_table`(표와 문단을 넣고 빼는 것은 주석 구획에서만).
+- 칸은 칸 ID(`t003.r004.c02`)나 행(행 ID 또는 구획·행 이름) + 열(번호, 머리글, `당기`·`전기`)로 가리킨다. 이름이 여러 행에 걸리면 고르지 않고 후보와 함께 오류를 낸다.
+- 숫자는 JSON 숫자로 준다. 괄호 음수, 소수 자리, '주' 같은 단위는 원래 칸의 표기를 따른다.
+- 편집이 없으면 원본과 바이트가 같은 파일이 나온다. 출력 파일이 이미 있으면 `--force` 없이는 쓰지 않는다.
+- 종료코드: 0 정상, 2 입력 오류(아무것도 쓰지 않음), 3 안전 장치로 멈춤(덮어쓰기 등). `--json`이면 결과를 같은 형식의 JSON 봉투로 낸다.
 
 ### recheck - 헤드리스 재검증 (Excel 없이)
 

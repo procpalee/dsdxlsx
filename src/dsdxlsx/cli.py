@@ -71,6 +71,78 @@ def cmd_import(args) -> int:
     return 0
 
 
+def cmd_inspect(args) -> int:
+    from . import docview
+    package = read_dsd(args.dsd)
+    doc = parse_contents(package.contents)
+    only = [s for part in (args.section or []) for s in part.split(",") if s.strip()]
+    d = docview.doc_dict(doc, only=only or None, source=os.path.basename(args.dsd),
+                         data=package.contents)
+    if only and not d["sections"]:
+        keys = ", ".join(s.key for s in docview.sections(doc))
+        print(f"오류: 구획 {', '.join(only)} 없음 - 있는 구획: {keys}", file=sys.stderr)
+        return 2
+    text = docview.dumps(d, pretty=args.pretty) if args.json else docview.to_markdown(d)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8") as f:
+            f.write(text)
+        print(f"저장: {args.out}")
+    else:
+        sys.stdout.write(text + "\n")
+    return 0
+
+
+def cmd_apply(args) -> int:
+    import json
+
+    from . import result as R
+    from .edits import EditError, apply_edits, normalize_edits
+
+    def fail(code: int, msg: str) -> int:
+        if args.json:
+            return R.emit(R.envelope("apply", code, errors=[msg]))
+        print(f"오류: {msg}", file=sys.stderr)
+        return code
+
+    try:
+        raw = sys.stdin.read() if args.edits == "-" else open(args.edits, encoding="utf-8").read()
+        edits = normalize_edits(json.loads(raw))
+    except (OSError, json.JSONDecodeError, EditError) as e:
+        return fail(R.INPUT_ERROR, f"편집 목록을 읽지 못했다 - {e}")
+    out = args.out or os.path.splitext(args.dsd)[0] + "_수정.dsd"
+    if not args.dry_run and os.path.exists(out) and not args.force:
+        return fail(R.STOPPED, f"출력 파일이 이미 있다: {out} - 다른 -o 를 주거나 --force")
+    if not args.dry_run and os.path.abspath(out) == os.path.abspath(args.dsd):
+        return fail(R.STOPPED, "입력 DSD 를 그 자리에서 덮어쓰지 않는다 - 다른 -o 를 주라")
+    package = read_dsd(args.dsd)
+    try:
+        res = apply_edits(package.contents, edits)
+    except (EditError, DsdParseError) as e:
+        return fail(R.INPUT_ERROR, str(e))
+    warnings = list(res.report.warnings)
+    if res.report.autosum_tables:
+        warnings.append("자동합계 칸이 있는 표를 고침: " + ", ".join(sorted(res.report.autosum_tables))
+                        + " - DART 편집기에서 합계를 다시 확인")
+    outputs = []
+    if not args.dry_run:
+        write_dsd(out, package, res.contents)
+        outputs.append(out)
+    if args.json:
+        return R.emit(R.envelope("apply", R.OK, outputs=outputs, warnings=warnings,
+                                 dry_run=args.dry_run, changed=res.report.changed,
+                                 changes=res.changes(), structural=res.report.structural))
+    print(("[미리보기] " if args.dry_run else "") + (f"저장: {out}" if outputs else "쓰지 않음"))
+    for k, v in res.changes().items():
+        print(f"  {k}: {len(v)}건 - " + ", ".join(map(str, v[:8])) + (" …" if len(v) > 8 else ""))
+    if not res.report.changed:
+        print("  바뀐 것 없음 - 원본과 같은 바이트")
+    for w in warnings:
+        print(f"  [경고] {w}")
+    if res.report.structural:
+        print("  [주의] 표·문단 구조가 바뀌어 ID 가 다시 매겨진다 - 다음 편집 전에 inspect 를 다시 보라")
+    return R.OK
+
+
 def cmd_verify(args) -> int:
     for line in diff_dsd(args.a, args.b):
         print(line)
@@ -821,6 +893,24 @@ def main(argv=None) -> int:
     p.add_argument("xlsx")
     p.add_argument("-o", "--out")
     p.set_defaults(func=cmd_import)
+
+    p = sub.add_parser("inspect", help="DSD 를 칸 ID·행 이름·열 머리글과 함께 마크다운이나 JSON 으로 펼침(LLM 읽기용)")
+    p.add_argument("dsd")
+    p.add_argument("--section", action="append",
+                   help="이 구획만(재무제표 명칭 또는 주석 번호, 쉼표로 여러 개, 반복 가능)")
+    p.add_argument("--json", action="store_true", help="JSON 으로(기본: 마크다운)")
+    p.add_argument("--pretty", action="store_true", help="JSON 들여쓰기")
+    p.add_argument("-o", "--out", help="저장 경로(기본: 표준출력)")
+    p.set_defaults(func=cmd_inspect)
+
+    p = sub.add_parser("apply", help="JSON 편집 목록을 DSD 에 반영(엑셀 없이 - import 와 같은 가드)")
+    p.add_argument("dsd")
+    p.add_argument("edits", help="편집 목록 JSON 파일(- 이면 표준입력)")
+    p.add_argument("-o", "--out", help="출력 DSD(기본: <이름>_수정.dsd, 있으면 멈춤)")
+    p.add_argument("--dry-run", action="store_true", help="쓰지 않고 바뀔 내용만")
+    p.add_argument("--force", action="store_true", help="출력 파일이 있어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(종료코드 0/2/3)")
+    p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("diff", help="두 DSD 의 보이는 차이를 HTML 보고서로(두 판 나란히 보기 + 바뀐 곳만 카드)")
     p.add_argument("a", help="비교 기준 DSD(예: 우리 판)")
