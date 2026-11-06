@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from . import splice
 from .check import TableView, build_views, norm, use_profile
 from .model import Document
+from .period import detect_period
 
 _GISU_RE = re.compile(r"(제\s*)(\d{1,3})(\s*\(?[당전]?\)?\s*기)")
 _DATE_RE = re.compile(r"(19|20)\d{2}(?=\s*[년.\-/])")
@@ -84,7 +85,14 @@ def _gisu_mapping(doc: Document) -> dict[int, int]:
 
 def _period_years(doc: Document) -> set[int]:
     """보고기간 연도 집합 — TU 자동필드(기계값 YYYYMMDD)에서 추출한 최신 2개
-    연도만. 이 연도의 날짜만 +1년 대상 — 설립·상장 등 역사적 연도 오염 방지."""
+    연도만. 이 연도의 날짜만 +1년 대상 — 설립·상장 등 역사적 연도 오염 방지.
+
+    당기말은 보고기간 필드(TU PERIODTO)로 먼저 정한다 - 연차 감사보고서는 지배기구
+    커뮤니케이션 날짜(COMM_DATE)·보고서일이 다음 해라, TU 전체 최대 연도로 잡으면
+    당기를 한 해 늦게 보고 전기말 날짜가 +1 되지 않는다(2026-11-06 실측)."""
+    p = detect_period(doc)
+    if p is not None:
+        return {p.year, p.year - 1}
     years: set[int] = set()
     for node in doc.nodes.values():
         if node.tag == "TU":

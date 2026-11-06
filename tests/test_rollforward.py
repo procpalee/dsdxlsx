@@ -62,6 +62,23 @@ def test_roll_year_bump_is_selective():
     assert any(i.grade == "확인필요" for i in report.items)
 
 
+def test_roll_period_years_ignore_comm_date():
+    """연차 감사보고서의 지배기구 커뮤니케이션 날짜(다음 해)가 있어도 당기말은
+    PERIODTO 로 정해 전기말 연도도 +1 된다."""
+    contents = factory.document(
+        factory.p("표지"),
+        '<TABLE><TBODY><TR><TU AUNIT="PERIODTO" AUNITVALUE="20251231">2025년 12월 31일</TU>'
+        '<TU AUNIT="COMM_DATE" AUNITVALUE="20260224">2026년 02월 24일</TU></TR></TBODY></TABLE>',
+        factory.p("제 25(당) 기말 : 2025년 12월 31일 현재 제 24(전) 기말 : 2024년 12월 31일 현재"),
+    )
+    doc = parse_contents(contents)
+    assert rollforward._period_years(doc) == {2025, 2024}
+    doc2, _ = _rolled(contents)
+    para = next(n for n in doc2.nodes.values() if "(전) 기말" in n.text)
+    assert "제 26(당) 기말 : 2026년 12월 31일" in para.text
+    assert "제 25(전) 기말 : 2025년 12월 31일" in para.text
+
+
 def test_roll_unpaired_table_untouched():
     contents = factory.document(
         factory.p("표지"),
