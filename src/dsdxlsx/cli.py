@@ -76,7 +76,38 @@ def _import_changes(report) -> dict:
     return out
 
 
+def _import_foot(args) -> int:
+    """풋팅 워크북(foot 으로 만든 엑셀)에서 고친 칸 값을 원본 DSD 에 반영 - 칸 값만, 행·표 구조는 안 됨.
+    종료코드: 0 반영 / 1 반영했고 무시한 칸이 있음 / 2 오류(파일을 만들지 않음) / 3 멈춤."""
+    from pathlib import Path
+
+    from .foot import mapsheet, writeback
+
+    try:
+        out = args.out or str(writeback.default_output(args.xlsx))
+        guard.check_out([out], force=getattr(args, "force", False), inputs=[args.xlsx])
+        r = writeback.writeback(args.xlsx, out)
+    except (mapsheet.MapError, writeback.WritebackError) as e:
+        raise guard.InputError(str(e)) from None
+    writeback.print_report(Path(args.xlsx), r)
+    edits = [{"cell": e.addr, "node": e.node_id, "old": e.old, "new": e.new} for e in r.edits]
+    if r.rc == 2:
+        for msg in r.errors:
+            print(f"오류: {msg}", file=sys.stderr)
+        _note(args, kind="foot", edits=[])
+        return 2
+    guard.remember(out)
+    _note(args, outputs=[out], warnings=r.warnings, kind="foot", source=r.source,
+          changed=bool(edits), structural=False, edits=edits)
+    print("  최종 확인: 결과 DSD를 DART 편집기로 열어 정상 표시되는지 확인하세요.")
+    return r.rc
+
+
 def cmd_import(args) -> int:
+    from .foot import mapsheet as foot_map
+
+    if foot_map.is_foot_workbook(args.xlsx):
+        return _import_foot(args)
     out = args.out or os.path.splitext(args.xlsx)[0] + "_수정.dsd"
     guard.check_out([out], force=getattr(args, "force", False), inputs=[args.xlsx])
     package, new_contents, report = import_xlsx(args.xlsx)
@@ -1316,7 +1347,8 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_export)
 
-    p = sub.add_parser("import", help="편집한 XLSX → DSD 재변환")
+    p = sub.add_parser("import", help="편집한 XLSX → DSD 재변환(export 로 만든 편집용 엑셀, 또는 foot 으로 만든 "
+                                      "풋팅 워크북 - 풋팅 워크북은 칸 값 수정만)")
     p.add_argument("xlsx")
     p.add_argument("-o", "--out", help="출력 DSD(기본: <이름>_수정.dsd)")
     p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")

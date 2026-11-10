@@ -81,3 +81,66 @@ def test_foot_protects_an_edited_workbook(tmp_path, capsys):
     assert "고쳐진 파일" in capsys.readouterr().err
     assert main(["foot", str(p), "--force"]) == 0
     assert main(["foot", str(p), str(p), "-o", str(tmp_path / "x.xlsx")]) == 2   # -o 는 파일 하나일 때만
+
+
+# ── 풋팅 워크북에서 고친 값 → DSD (import 가 워크북 종류를 알아서 가른다) ──
+
+def _foot_book(tmp_path, capsys):
+    p = tmp_path / "보고서.dsd"
+    write_dsd(p)
+    assert main(["foot", str(p)]) == 0
+    capsys.readouterr()
+    return p, tmp_path / "보고서_풋팅.xlsx"
+
+
+def _set(xlsx, sheet, label, value):
+    """sheet 에서 label 행의 바로 오른쪽 칸(당기 금액)을 바꾼다."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wb = openpyxl.load_workbook(str(xlsx))
+    ws = wb[sheet]
+    cell = next(c for row in ws.iter_rows() for c in row
+                if isinstance(c.value, str) and c.value.strip() == label)
+    ws.cell(cell.row, cell.column + 1).value = value
+    wb.save(str(xlsx))
+
+
+def test_import_takes_a_foot_workbook(tmp_path, capsys):
+    from dsdxlsx.dsd_io import read_dsd
+
+    dsd, book = _foot_book(tmp_path, capsys)
+    assert main(["import", str(book), "--json", "-o", str(tmp_path / "그대로.dsd")]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["kind"] == "foot" and env["changed"] is False and env["edits"] == []
+    assert read_dsd(env["outputs"][0]).contents == read_dsd(str(dsd)).contents   # 안 고치면 바이트 그대로
+
+    _set(book, "BS", "매출채권", 301)
+    assert main(["import", str(book), "--json"]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["outputs"] == [str(tmp_path / "보고서_수정.dsd")]
+    assert [(e["old"], e["new"]) for e in env["edits"]] == [("300", "301")]
+    before, after = read_dsd(str(dsd)).contents, read_dsd(env["outputs"][0]).contents
+    assert len(before) == len(after) and sum(a != b for a, b in zip(before, after)) == 1
+
+
+def test_import_refuses_row_insert_in_foot_workbook(tmp_path, capsys):
+    _, book = _foot_book(tmp_path, capsys)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        wb = openpyxl.load_workbook(str(book))
+    wb["BS"].insert_rows(9)                           # 표 중간에 행을 끼워 넣음
+    wb.save(str(book))
+    assert main(["import", str(book), "--json"]) == 2
+    env = json.loads(capsys.readouterr().out)
+    assert not env["ok"] and env["outputs"] == [] and any("밀렸습니다" in e or "다릅니다" in e for e in env["errors"])
+    assert not (tmp_path / "보고서_수정.dsd").exists()
+
+
+def test_export_workbook_still_imports_the_old_way(tmp_path, capsys):
+    p = tmp_path / "a.dsd"
+    F.write_dsd(p, F.standard_contents())
+    assert main(["export", str(p)]) == 0
+    capsys.readouterr()
+    assert main(["import", str(tmp_path / "a.xlsx"), "--json"]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert "kind" not in env and env["changed"] is False

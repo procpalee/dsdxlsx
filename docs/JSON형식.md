@@ -181,7 +181,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | 명령 | 더해지는 필드 |
 |---|---|
 | `apply` | `dry_run`, `changed`, `structural`, `changes` |
-| `import` | `changed`, `structural`, `changes` |
+| `import` | `changed`, `structural`, `changes`. 풋팅 워크북이면 `kind: "foot"`, `source`, `changed`, `edits`(cell·node·old·new) |
 | `export` | `sheets`, `tables`, `paras` |
 | `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
 | `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error` |

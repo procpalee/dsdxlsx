@@ -88,6 +88,17 @@ def write(wb, dsd_bytes: bytes, source_name: str, cellmap: CellMap) -> None:
                    1 if e.note_col else 0, 1 if e.partial else 0])
 
 
+def is_foot_workbook(xlsx_path: str) -> bool:
+    """풋팅 워크북(셀맵 시트가 있는 엑셀)인가 - export 로 만든 편집용 엑셀과 가른다."""
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(xlsx_path) as zf:
+            return b'name="' + CELLMAP_SHEET.encode() + b'"' in zf.read("xl/workbook.xml")
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return False
+
+
 def read(xlsx_path: str) -> tuple[dict, bytes, list[MapEntry]]:
     """(meta, 원본 dsd bytes, 셀맵) — 없거나 스키마 불일치면 MapError."""
     wb = load_workbook(xlsx_path, read_only=True, data_only=True)
