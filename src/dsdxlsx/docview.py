@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 
 from . import grid as grid_mod
@@ -176,6 +177,180 @@ def to_markdown(d: dict) -> str:
                 tag = " 머리" if r.get("head") else (" 합계" if r.get("total") else "")
                 lines.append(f"| {r['id']}{tag} | " + " | ".join(vals) + " |")
             lines.append("")
+    return "\n".join(lines)
+
+
+# ── 목차(--outline) ──────────────────────────────────────────────────
+
+OUTLINE_SCHEMA = "dsdxlsx.outline/1"
+FIND_SCHEMA = "dsdxlsx.find/1"
+
+
+def _one_line(text: str, width: int = 60) -> str:
+    s = " ".join(text.split())
+    return s if len(s) <= width else s[:width - 1] + "…"
+
+
+def outline_dict(doc: Document, *, only: list[str] | None = None, source: str = "",
+                 data: bytes | None = None) -> dict:
+    """구획마다 표·문단 ID 와 크기만 - 큰 문서에서 어디를 읽을지 고르는 용도."""
+    secs = []
+    for sec in sections(doc):
+        if only and sec.key not in only and sec.sheet not in only:
+            continue
+        blocks = []
+        for block in sec.blocks:
+            if block.kind == "table":
+                t = block.item
+                tv = table_view(t, sec)
+                d = {"type": "table", "id": t.id, "ncols": t.ncols, "nrows": len(t.rows),
+                     "headers": [tv.col_header(c) for c in range(t.ncols)],
+                     "labels": [tv.row_label(i).strip() for i in tv.body if tv.row_label(i).strip()][:4]}
+                unit = _unit(t)
+                if unit:
+                    d["unit"] = unit
+            else:
+                text = block.item.text
+                d = {"type": "para" if block.kind == "p" else "label", "id": block.item.id,
+                     "chars": len(text), "text": _one_line(text)}
+            blocks.append(d)
+        secs.append({"section": sec.key, "kind": sec.kind, "title": sec.title,
+                     "tables": sum(1 for b in blocks if b["type"] == "table"),
+                     "paras": sum(1 for b in blocks if b["type"] == "para"), "blocks": blocks})
+    out = {"schema": OUTLINE_SCHEMA, "file": source}
+    if data is not None:
+        out["sha256"] = hashlib.sha256(data).hexdigest()
+    out["sections"] = secs
+    return out
+
+
+def outline_markdown(d: dict) -> str:
+    secs = d["sections"]
+    lines = [f"# {d.get('file') or 'DSD'} - 목차", "",
+             f"구획 {len(secs)}개, 표 {sum(s['tables'] for s in secs)}개, "
+             f"문단 {sum(s['paras'] for s in secs)}개. 내용은 inspect --section <값> 으로 본다.", ""]
+    for sec in secs:
+        head = (f"주석 {sec['section']} {sec['title']}" if sec["kind"] == "note" else sec["title"])
+        lines.append(f"## {head} [section: {sec['section']}] - 표 {sec['tables']}, 문단 {sec['paras']}")
+        for b in sec["blocks"]:
+            if b["type"] == "table":
+                unit = f", 단위 {b['unit']}" if b.get("unit") else ""
+                heads = " / ".join(_one_line(h, 14) for h in b["headers"] if h)
+                labels = ", ".join(_one_line(x, 14) for x in b["labels"])
+                lines.append(f"- {b['id']} 표 {b['ncols']}열×{b['nrows']}행{unit}: {heads}"
+                             + (f" - {labels}" if labels else ""))
+            else:
+                kind = "문단" if b["type"] == "para" else "제목"
+                lines.append(f"- {b['id']} {kind}({b['chars']}자): {b['text']}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ── 찾기(--find) ─────────────────────────────────────────────────────
+
+def _snippet(text: str, query: str, width: int = 40) -> str:
+    flat = " ".join(text.split())
+    k = flat.replace(" ", "").lower().find(query)
+    if k < 0 or len(flat) <= 2 * width:
+        return _one_line(flat, 2 * width)
+    # 공백을 뺀 위치 k → 원문 위치로 대략 환산
+    seen = pos = 0
+    for pos, ch in enumerate(flat):
+        if ch != " ":
+            if seen == k:
+                break
+            seen += 1
+    a = max(0, pos - width)
+    return ("…" if a else "") + flat[a:pos + width] + ("…" if pos + width < len(flat) else "")
+
+
+_QNUM_RE = re.compile(r"^(\()?(-)?(\d[\d,]*(?:\.\d+)?)\)?$")
+
+
+def _query_number(q: str):
+    """찾는 글이 숫자면 그 값('1200', '1,200', '(1,200)', '-1200')."""
+    m = _QNUM_RE.match(q.replace(" ", ""))
+    if not m:
+        return None
+    v = float(m.group(3).replace(",", ""))
+    if m.group(1) or m.group(2):
+        v = -v
+    return int(v) if v == int(v) else v
+
+
+def find_dict(doc: Document, queries: list[str], *, only: list[str] | None = None,
+              source: str = "", limit: int = 200) -> dict:
+    """글(공백·대소문자 무시)이나 숫자 값이 든 문단·행·칸의 위치를 찾는다."""
+    wants = [(q, norm(q).lower(), _query_number(q)) for q in queries if q and q.strip()]
+    hits: list[dict] = []
+    total = 0
+
+    def add(hit: dict) -> None:
+        nonlocal total
+        total += 1
+        if len(hits) < limit:
+            hits.append(hit)
+
+    def match(text: str):
+        flat = norm(text).lower()
+        value = cell_value(text)
+        for q, nq, qv in wants:
+            if nq and nq in flat:
+                return q
+            if qv is not None and value is not None and qv == value and qv != 0:
+                return q
+        return None
+
+    for sec in sections(doc):
+        if only and sec.key not in only and sec.sheet not in only:
+            continue
+        for block in sec.blocks:
+            if block.kind != "table":
+                q = match(block.item.text)
+                if q is not None:
+                    add({"section": sec.key, "type": "para" if block.kind == "p" else "label",
+                         "id": block.item.id, "query": q,
+                         "text": _snippet(block.item.text, norm(q).lower())})
+                continue
+            table = block.item
+            tv = table_view(table, sec)
+            g = grid_mod.expand(table)
+            for i, row in enumerate(table.rows):
+                label = tv.row_label(i)
+                for c, gc in enumerate(g[i]):
+                    if gc is None or gc.kind != "cell" or not gc.node.text.strip():
+                        continue
+                    q = match(gc.node.text)
+                    if q is None:
+                        continue
+                    if gc.node.text.strip() == label.strip() and not row.in_thead:
+                        add({"section": sec.key, "type": "row", "id": row.id, "table": table.id,
+                             "query": q, "label": label.strip()})
+                    else:
+                        add({"section": sec.key, "type": "cell", "id": gc.node.id, "row": row.id,
+                             "table": table.id, "query": q, "label": label.strip(), "col": c,
+                             "header": tv.col_header(c), "text": gc.node.text,
+                             **({"head": True} if row.in_thead else {})})
+    return {"schema": FIND_SCHEMA, "file": source, "queries": [q for q, _, _ in wants],
+            "total": total, "truncated": total > len(hits), "hits": hits}
+
+
+def find_markdown(d: dict) -> str:
+    qs = ", ".join(f'"{q}"' for q in d["queries"])
+    lines = [f"# {d.get('file') or 'DSD'} - 찾기: {qs}", "",
+             f"{d['total']}건" + (f"(앞 {len(d['hits'])}건만 - --limit 로 늘림)" if d["truncated"] else ""),
+             ""]
+    for h in d["hits"]:
+        where = f"[section: {h['section']}]"
+        if h["type"] == "row":
+            lines.append(f"- {where} 행 {h['id']} '{h['label']}'")
+        elif h["type"] == "cell":
+            head = " 머리글" if h.get("head") else ""
+            lines.append(f"- {where} 칸{head} {h['id']} = {_md(h['text'])} "
+                         f"(행 '{h['label']}', 열 [{h['col']}] {_one_line(h['header'], 20)})")
+        else:
+            kind = "문단" if h["type"] == "para" else "제목"
+            lines.append(f"- {where} {kind} {h['id']}: {h['text']}")
     return "\n".join(lines)
 
 

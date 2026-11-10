@@ -5,13 +5,14 @@ LLM 에이전트나 스크립트가 엑셀 없이 DSD를 읽고 고칠 때 쓰�
 
 ## 작업 순서
 
-1. `dsdxlsx inspect 보고서.dsd --section 4`로 고칠 구획을 읽는다(마크다운이 짧아 LLM 문맥에 맞다. 정확한 값이 필요하면 `--json`).
-2. 편집 목록을 JSON으로 쓴다.
-3. `dsdxlsx apply 보고서.dsd edits.json --dry-run --json`으로 바뀔 내용을 확인한다.
-4. `dsdxlsx apply 보고서.dsd edits.json --json`으로 반영한다(`보고서_수정.dsd`).
-5. `dsdxlsx check 보고서_수정.dsd`로 검산하고, 불일치가 있으면 1로 돌아간다.
+1. `dsdxlsx inspect 보고서.dsd --outline`으로 구획과 표 목록을 본다. 찾는 글이 있으면 `--find 글`로 위치(ID)를 바로 얻는다.
+2. `dsdxlsx inspect 보고서.dsd --section 4`로 고칠 구획을 읽는다(마크다운이 짧아 LLM 문맥에 맞다. 정확한 값이 필요하면 `--json`).
+3. 편집 목록을 JSON으로 쓴다.
+4. `dsdxlsx apply 보고서.dsd edits.json --dry-run --json`으로 바뀔 내용을 확인한다.
+5. `dsdxlsx apply 보고서.dsd edits.json --json`으로 반영한다(`보고서_수정.dsd`).
+6. `dsdxlsx check 보고서_수정.dsd --json`으로 검산한다. 종료코드가 1이면 `mismatches`의 행 ID와 열 번호로 2번부터 다시 한다.
 
-행·문단·표를 넣거나 지우면 ID가 다시 매겨진다. 그 뒤 편집은 새 파일을 다시 `inspect`해서 쓴다.
+행·문단·표·주석을 넣거나 지우면 ID가 다시 매겨진다. 그 뒤 편집은 새 파일을 다시 `inspect`해서 쓴다.
 
 ## inspect (`dsdxlsx.inspect/1`)
 
@@ -50,7 +51,41 @@ LLM 에이전트나 스크립트가 엑셀 없이 DSD를 읽고 고칠 때 쓰�
 | `cells[].readonly` | 자동 필드(TU). 고칠 수 없다 |
 | `notes` | 표 잠금 사유(고정 표, 불규칙 격자, 자동합계) |
 
-마크다운(`--format` 없이 기본)은 같은 내용을 표로 보여 준다. 열 머리글 앞 `[1]`이 `col` 번호다.
+마크다운(`--json` 없이 기본)은 같은 내용을 표로 보여 준다. 열 머리글 앞 `[1]`이 `col` 번호다.
+
+### 목차 (`--outline`, `dsdxlsx.outline/1`)
+
+칸 내용 없이 구획마다 블록 목록만 준다. 주석이 수십 개인 문서에서 어디를 읽을지 먼저 고를 때 쓴다.
+
+```json
+{"schema": "dsdxlsx.outline/1", "file": "보고서.dsd", "sha256": "…",
+ "sections": [
+  {"section": "4", "kind": "note", "title": "현금및현금성자산", "tables": 1, "paras": 1,
+   "blocks": [
+    {"type": "para", "id": "p003", "chars": 38, "text": "4. 현금및현금성자산 현금및현금성자산의 내역은…"},
+    {"type": "table", "id": "t003", "ncols": 3, "nrows": 5, "unit": "백만원",
+     "headers": ["구  분", "당기말", "전기말"], "labels": ["보유현금", "보통예금", "합  계"]}]}]}
+```
+
+`labels`는 본문 행 이름 앞 4개다(표를 알아보는 용도).
+
+### 찾기 (`--find 글`, `dsdxlsx.find/1`)
+
+글이 든 문단·행·칸의 위치만 준다. 공백과 대소문자는 무시한다. 숫자를 주면 값으로도 찾는다(`1200`으로 `1,200` 칸을 찾음).
+`--find`를 여러 번 주면 어느 하나라도 맞는 곳을 모으고, `--section`으로 범위를 줄일 수 있다.
+
+```json
+{"schema": "dsdxlsx.find/1", "file": "보고서.dsd", "queries": ["보통예금"], "total": 1, "truncated": false,
+ "hits": [{"section": "4", "type": "row", "id": "t003.r004", "table": "t003", "query": "보통예금", "label": "보통예금"}]}
+```
+
+| `type` | 뜻 | 위치 필드 |
+|---|---|---|
+| `row` | 행 이름이 맞음 | `id`(행 ID), `table`, `label` |
+| `cell` | 그 밖의 칸이 맞음(머리 행이면 `head: true`) | `id`(칸 ID), `row`, `table`, `col`, `header`, `text` |
+| `para`, `label` | 문단, 제목 | `id`, `text`(맞은 곳 앞뒤) |
+
+결과가 `--limit`(기본 200)을 넘으면 `truncated`가 `true`다.
 
 ## apply 편집 목록
 
@@ -79,9 +114,17 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `delete_para` | `id` | 문단을 지운다(주석 구획만) |
 | `insert_table` | `after`, `rows`, `header_rows`(기본 1), `template`(t###) | 같은 열 수의 기존 표를 본떠 새 표(주석 구획만) |
 | `delete_table` | `id` | 표를 지운다(주석 구획만) |
+| `insert_note` | `no`, `title`, `blocks` | 새 주석. `blocks`의 글자는 문단, `{template, header_rows, rows}` 객체는 표(본뜰 표 `template` 필수) |
+| `delete_note` | `no` | 주석을 통째로 지운다 |
 
 숫자는 JSON 숫자로 준다. 괄호 음수, 소수 자리, '주' 같은 단위는 원래 칸의 표기를 따르고, 0은 `-`로 쓴다.
 글자로 준 값은 그대로 들어간다.
+
+주석 추가와 삭제:
+
+- `insert_note`의 `no`가 마지막 번호 + 1이면 맨 끝에 붙는다. 이미 있는 번호면 그 앞에 끼우고 뒤 주석의 제목 번호와 재무제표의 주석 참조 칸을 하나씩 민다. 본문 글에서 다른 주석을 가리키는 번호는 고치지 않고 `warnings`에 적는다.
+- `delete_note`는 번호를 당기지 않는다. 지운 번호를 아직 가리키는 곳은 `warnings`에 나오고, 번호 정리는 `dsdxlsx renumber 파일.dsd --close-gap`으로 한다.
+- 한 번의 `apply`에 `insert_note`는 하나만 쓸 수 있고 `delete_note`와 함께 쓸 수 없다(차례로 나눠 실행).
 
 ### 막는 것
 
@@ -90,11 +133,11 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 - 고정 표(AFIXTABLE), 불규칙 격자, 세로 병합에 걸린 행, 머리 행의 행 추가·삭제
 - 자동 필드(TU) 수정, 행 재배열
 - 재무제표 본문 표의 신설·삭제, 열 수가 다른 표 신설
-- 새 주석 추가·삭제(아직 `import`의 `#새주석`·`#주석삭제`로만)
+- 번호를 건너뛰는 새 주석
 
 ## 결과 봉투 (`dsdxlsx.result/1`)
 
-`--json`을 주면 결과를 표준출력에 이 형식으로 낸다.
+모든 명령은 `--json`을 주면 사람용 글 대신 이 형식 하나를 표준출력에 낸다(`inspect`의 `--json`은 문서 내용을 JSON으로 낸다는 뜻이라 예외).
 
 ```json
 {"schema": "dsdxlsx.result/1", "command": "apply", "version": "0.2.0",
@@ -104,14 +147,76 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
  "changes": {"cell_edits": ["t003.r004.c02"], "row_inserts": ["t003 r005 위치에 신규 행 [구획 4 새 줄]"]}}
 ```
 
+| 공통 필드 | 뜻 |
+|---|---|
+| `ok` | 명령이 끝까지 돌았는가(종료코드 0이나 1) |
+| `exit_code` | 프로세스 종료코드와 같다 |
+| `outputs` | 만들었거나 고친 파일 경로 |
+| `warnings` / `errors` | 확인할 것 / 실패 이유 |
+| `log` | 사람용 출력 줄(구조화한 필드가 충분한 `apply`, `dart`, `check`에는 없다) |
+
 | 종료코드 | 뜻 |
 |---|---|
 | 0 | 정상 |
-| 1 | 정상 실행했고 확인할 발견 사항이 있음 |
+| 1 | 정상 실행했고 확인할 것이 있음(검산 불일치, 대사 확인 필요, 못 채운 칸 등) |
 | 2 | 입력 오류(파일, JSON, 위치 지정, 안전장치). 아무것도 쓰지 않음 |
-| 3 | 안전 장치로 멈춤(출력 파일이 이미 있음, 입력 파일 자리에 쓰기). 아무것도 쓰지 않음 |
+| 3 | 안전장치로 멈춤(사람이 고친 출력 파일, 입력 파일 자리에 쓰기). 아무것도 쓰지 않음 |
 
-`changes`의 키: `cell_edits`, `row_inserts`, `row_deletes`, `table_inserts`, `table_deletes`, `para_inserts`, `para_deletes`, `autosum_tables`.
+`check`, `recon`, `fill`은 `--json`을 줬을 때만 확인할 것이 있으면 1을 낸다. `--json` 없이 부르면 예전처럼 0이다(이 종료코드에 기대는 다른 도구가 있다).
+`check`와 `recon`의 `--json`은 뒤에 `.json` 경로를 주면 예전 방식(그 파일에 리뷰용·요약 JSON 저장)으로 돈다.
+
+### 덮어쓰기 규칙
+
+사람이 이어서 고치는 결과물(`export`의 엑셀, `import`·`renumber`·`fill`의 DSD, `rollforward`·`roll-interim`의 DSD와 정산표)은 출력 파일이 이미 있을 때 이렇게 한다.
+
+- dsdxlsx가 만든 그대로면 덮어쓴다.
+- 만든 뒤에 바뀌었거나, 이 PC에서 dsdxlsx가 만든 기록이 없으면 멈춘다(종료코드 3). 다른 `-o`를 주거나 `--force`를 준다.
+- 입력 파일과 같은 경로에는 `--force`를 줘도 쓰지 않는다.
+
+`apply`와 `dart`는 더 엄격해서 출력 파일이 있기만 하면 멈춘다. 다시 만들 때마다 새로 쓰는 보고서(`check -o`, `recon`·`fill`의 결과 엑셀, `diff`의 HTML)는 그냥 덮어쓴다.
+기록은 `%LOCALAPPDATA%\dsdxlsx\outputs.json`에 둔다(`DSDXLSX_STATE`로 폴더를 바꿀 수 있다).
+
+### 명령별 필드
+
+| 명령 | 더해지는 필드 |
+|---|---|
+| `apply` | `dry_run`, `changed`, `structural`, `changes` |
+| `import` | `changed`, `structural`, `changes` |
+| `export` | `sheets`, `tables`, `paras` |
+| `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
+| `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
+| `fill` | `period`, `side`, `counts`, `unfilled` |
+| `build` | `side`, `steps` |
+| `rollforward`, `roll-interim` | `counts`(자동확정·확인필요·미처리), `painted`, `todo`. `roll-interim`은 `period`, `dart`도 |
+| `renumber` | `notes`, `mapping`, `mentions`, `headings`, `ref_cells` |
+| `refoot` | `applied`, `items`, `skipped` |
+| `diff` | `total`, `by_kind` |
+| `verify` | `same`, `differences` |
+| `disc` | `form`, `listed`, `interim`, `counts` |
+| `dart` | 아래 |
+
+`changes`의 키: `cell_edits`, `row_inserts`, `row_deletes`, `table_inserts`, `table_deletes`, `para_inserts`, `para_deletes`, `note_inserts`, `note_deletes`, `renumbered`, `autosum_tables`.
+`structural`이 `true`면 ID가 다시 매겨졌으니 다음 편집 전에 `inspect`를 다시 한다.
+
+### check 결과
+
+```json
+{"schema": "dsdxlsx.result/1", "command": "check", "ok": true, "exit_code": 1,
+ "counts": {"C1": 0, "C2": 2, "C3": 10, "C7": 0, "C4": 14, "C5": 0, "C8": 0, "C6": 86},
+ "findings": [{"check": "C3", "level": "warn",
+               "where": "[주석4 현금및현금성자산] t003 '합  계' × '당기말'",
+               "message": "합계행 기재 1,200 ≠ 계산 1,300 (차이 (100))"}],
+ "mismatches": [{"check": "C3", "section": "주석4 현금및현금성자산", "table": "t003",
+                 "row": "t003.r005", "label": "합  계", "col": 1, "header": "당기말",
+                 "stated": 1200, "computed": 1300, "note": ""}],
+ "suppressed": 0, "tie_suggestions": 5,
+ "coverage": {"tables": 6, "checked": 5, "unchecked": ["t001"]}}
+```
+
+`mismatches`의 `row`와 `col`은 `apply`의 `{"op": "set", "row": …, "col": …}`에 그대로 쓸 수 있다.
+`stated`는 적힌 값, `computed`는 구성 칸으로 다시 계산한 값이다. 어느 쪽이 틀렸는지는 도구가 판단하지 않는다. 합계가 틀렸을 수도, 구성 칸이 틀렸을 수도 있으니 조서나 원자료로 확인한 뒤 고친다.
+`findings`의 `level`이 `warn`이나 `error`인 것이 하나라도 있으면 종료코드가 1이다. `info`는 참고다.
+`mismatches`에는 참고(`info`) 수준이거나 프로파일로 억제한 불일치도 들어 있어서, 종료코드가 0인데 `mismatches`가 비어 있지 않을 수 있다.
 
 ### dart 결과
 
@@ -130,4 +235,3 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 `source.kind`는 `F`(외부감사관련 공시) 또는 `A`(사업보고서 첨부)다. 접수번호로 받으면 공시 정보가 없어 `rcept_no`가 `null`이다.
 `rollforward`는 `--rollforward`를 줬을 때만 있다. `--list --json`은 `corp`(고유번호·회사명·종목코드)와 `filings`(공시 목록)를 낸다.
 키가 없거나 회사·공시를 못 찾으면 종료코드 2, 출력 파일이 이미 있으면 3이다.
-`structural`이 `true`면 ID가 다시 매겨졌으니 다음 편집 전에 `inspect`를 다시 한다.

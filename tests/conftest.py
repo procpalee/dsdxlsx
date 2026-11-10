@@ -23,3 +23,9 @@ def sample_dsd() -> str:
     if path is None:
         pytest.skip("샘플 .dsd 파일 없음 (gitignore 대상이라 로컬 전용)")
     return path
+
+
+@pytest.fixture(autouse=True)
+def _dsdxlsx_state(tmp_path_factory, monkeypatch):
+    """출력 기록(outputs.json)이 시험마다 따로, 실제 PC 폴더를 건드리지 않게."""
+    monkeypatch.setenv("DSDXLSX_STATE", str(tmp_path_factory.mktemp("state")))

@@ -16,7 +16,7 @@ DART 전자공시 편집기 문서(DSD)를 엑셀로 열어 고치고 다시 DSD
 | 직전 분·반기 DSD로 다음 분기 DSD를 만들고, 당기 칸을 조서에서 채운다 | `roll-interim`, `fill`, `build` |
 | DSD 숫자를 조서(최종분석적검토, 정산표)와 칸마다 맞춰 본다 | `recon` |
 | 한공회 공시사항점검표의 해당 여부와 주석 번호를 채운다 | `disc` |
-| 엑셀 없이 DSD를 읽고(마크다운·JSON) JSON 편집 목록으로 고친다. LLM이나 스크립트가 쓰기 좋다 | `inspect`, `apply` |
+| 엑셀 없이 DSD를 읽고(목차, 찾기, 마크다운·JSON) JSON 편집 목록으로 고친다. 모든 명령이 `--json` 결과를 내서 LLM이나 스크립트가 쓰기 좋다 | `inspect`, `apply` |
 | DART에 공시된 감사보고서를 받아 DSD로 만든다. 엑셀과 당기 작성용 기초 DSD까지 한 번에 | `dart` |
 
 ## 화면 예시
@@ -294,12 +294,16 @@ LLM 에이전트나 스크립트는 엑셀을 열기 어렵다. `inspect`로 문
 형식 전체는 [docs/JSON형식.md](docs/JSON형식.md)에 있다.
 
 ```powershell
+dsdxlsx inspect 보고서.dsd --outline            # 목차: 구획마다 표·문단 ID와 크기
+dsdxlsx inspect 보고서.dsd --find 보통예금      # 글이나 숫자가 든 자리(ID)만
 dsdxlsx inspect 보고서.dsd --section 4          # 주석 4만 마크다운으로
 dsdxlsx inspect 보고서.dsd --json -o 보고서.json  # 전체를 JSON으로
 dsdxlsx apply 보고서.dsd edits.json --dry-run    # 바뀔 내용만 보기
 dsdxlsx apply 보고서.dsd edits.json --json       # 반영 → 보고서_수정.dsd, 결과는 JSON
-dsdxlsx check 보고서_수정.dsd                    # 검산
+dsdxlsx check 보고서_수정.dsd --json             # 검산 - 불일치를 행 ID·열 번호와 함께
 ```
+
+에이전트에게 맡길 때는 [AGENTS.md](AGENTS.md)를 읽히거나 [skills/dsdxlsx](skills/dsdxlsx/SKILL.md) 스킬을 쓴다.
 
 `inspect` 마크다운의 표는 이렇게 나온다. 행 ID와 열 번호(`[1]`)로 칸을 가리킨다.
 
@@ -320,11 +324,18 @@ dsdxlsx check 보고서_수정.dsd                    # 검산
 ]}
 ```
 
-- 편집 종류: `set`(칸 값), `set_text`(문단), `insert_row`·`delete_row`, `insert_para`·`delete_para`, `insert_table`·`delete_table`(표와 문단을 넣고 빼는 것은 주석 구획에서만).
+- 편집 종류: `set`(칸 값), `set_text`(문단), `insert_row`·`delete_row`, `insert_para`·`delete_para`, `insert_table`·`delete_table`, `insert_note`·`delete_note`(표·문단·주석을 넣고 빼는 것은 주석 구획에서만). 주석을 중간에 끼우면 뒤 주석 번호와 재무제표의 주석 참조 칸을 같이 민다.
 - 칸은 칸 ID(`t003.r004.c02`)나 행(행 ID 또는 구획·행 이름) + 열(번호, 머리글, `당기`·`전기`)로 가리킨다. 이름이 여러 행에 걸리면 고르지 않고 후보와 함께 오류를 낸다.
 - 숫자는 JSON 숫자로 준다. 괄호 음수, 소수 자리, '주' 같은 단위는 원래 칸의 표기를 따른다.
 - 편집이 없으면 원본과 바이트가 같은 파일이 나온다. 출력 파일이 이미 있으면 `--force` 없이는 쓰지 않는다.
 - 종료코드: 0 정상, 2 입력 오류(아무것도 쓰지 않음), 3 안전 장치로 멈춤(덮어쓰기 등). `--json`이면 결과를 같은 형식의 JSON 봉투로 낸다.
+
+### 모든 명령에 공통 - 입력 점검, 덮어쓰기 보호, 결과 형식
+
+- 입력 점검: 없는 파일, DSD 자리에 엑셀(또는 그 반대), 옛 엑셀 형식(.xls), 깨진 파일은 명령이 돌기 전에 한 줄로 알리고 종료코드 2로 끝난다.
+- 덮어쓰기 보호: 사람이 이어서 고치는 결과물(`export`의 엑셀, `import`·`renumber`·`fill`의 DSD, `rollforward`·`roll-interim`의 DSD와 정산표)은 dsdxlsx가 만든 그대로일 때만 덮어쓴다. 만든 뒤에 바뀌었거나 만든 기록이 없는 파일이면 쓰지 않고 종료코드 3으로 멈춘다. 다른 `-o`를 주거나, 덮어써도 되면 `--force`를 준다. 입력 파일과 같은 경로에는 쓰지 않는다.
+- 결과 형식: 어느 명령이든 `--json`을 주면 결과(만든 파일, 경고, 오류, 명령별 요약)를 같은 JSON 봉투로 표준출력에 낸다. `check`·`recon`·`fill`은 이때 확인할 것이 있으면 종료코드 1을 낸다(`--json` 없이는 예전처럼 0).
+- 종료코드: 0 정상 / 1 확인할 것 있음 / 2 입력 오류 / 3 안전장치로 멈춤. 2와 3은 아무것도 쓰지 않았다는 뜻이다.
 
 ### recheck - 헤드리스 재검증 (Excel 없이)
 
@@ -405,6 +416,7 @@ AUTOSUM(자동합계) 셀이 있는 표를 수정하면 경고가 출력된다 -
 |---|---|
 | `OPENDART_API_KEY` | `dart`의 공시 원문 받기, `roll-interim`의 OpenDART 전기 값 대사(`--no-dart`로 끔). 환경변수가 없으면 저장소 루트나 실행 폴더의 `.env`에서 읽는다. 키는 opendart.fss.or.kr에서 발급한다 |
 | `KICPA_FORMS` | `disc`의 한공회 표준조서 서식 폴더(`--kicpa-dir`를 주면 그쪽이 먼저) |
+| `DSDXLSX_STATE` | 덮어쓰기 보호용 출력 기록(`outputs.json`)을 두는 폴더. 없으면 `%LOCALAPPDATA%\dsdxlsx` |
 | `DSDXLSX_AUTHOR` | 새로 만드는 출력 엑셀(`export`, `check -o` 보고서, `rollforward`·`roll-interim`·`build` 결과, `recon`, `fill`, `disc`)의 파일 속성 '만든 이'. 없으면 excel-theme 스킬의 `AUTHOR`(`EXCEL_AUTHOR`)를 쓰고, 스킬도 없으면 그대로 둔다. 이미 있는 엑셀에 적는 `check`·`refoot`·`annotate-ai`는 만든 이를 바꾸지 않는다 |
 
 ## 개발

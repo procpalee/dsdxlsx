@@ -2,33 +2,88 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import os
 import sys
 
+from . import guard
 from .dsd_io import read_dsd, write_dsd
 from .export_xlsx import export_xlsx
 from .import_xlsx import ImportError_, import_xlsx
 from .parse import DsdParseError, parse_contents
 from .verify import diff_dsd
 
+# 명령 → {인자 이름: 와야 하는 파일 형식} - 명령이 돌기 전에 guard.need 로 본다
+INPUTS = {
+    "export": {"dsd": "dsd"}, "import": {"xlsx": "xlsx"}, "inspect": {"dsd": "dsd"},
+    "apply": {"dsd": "dsd"}, "diff": {"a": "dsd", "b": "dsd", "base": "dsd"},
+    "verify": {"a": "dsd", "b": "dsd"}, "check": {"file": "either"},
+    "recon": {"file": "either", "workpaper": "workbook"},
+    "fill": {"file": "dsd", "workpaper": "workbook"},
+    "build": {"file": "dsd", "workpaper": "workbook"},
+    "annotate-ai": {"xlsx": "xlsx"}, "recheck": {"xlsx": "xlsx"}, "refoot": {"xlsx": "xlsx"},
+    "rollforward": {"dsd": "dsd"},
+    "roll-interim": {"dsd": "dsd", "prior_same": "dsd", "prior_annual": "dsd"},
+    "renumber": {"dsd": "dsd"}, "calibrate": {"dsd": "dsd"}, "ties": {"xlsx": "xlsx"},
+}
+# 결과 봉투를 스스로 내는 명령(나머지는 main 이 감싼다)
+SELF_EMIT = ("apply", "dart")
+
+
+def _note(args, *, outputs=(), warnings=(), **extra) -> None:
+    """봉투(--json)에 실을 내용을 모은다 - 사람용 출력과 따로."""
+    res = args.__dict__.setdefault("_res", {"outputs": [], "warnings": [], "extra": {}})
+    res["outputs"].extend(o for o in outputs if o)
+    res["warnings"].extend(warnings)
+    res["extra"].update(extra)
+
+
+def _envelope(args) -> bool:
+    """이 실행이 결과를 JSON 봉투로 내야 하는가."""
+    if args.cmd in ("check", "recon"):
+        return getattr(args, "json_out", None) == "-"
+    if args.cmd == "inspect":
+        return False
+    return bool(getattr(args, "json", False))
+
 
 def cmd_export(args) -> int:
+    out = args.out or os.path.splitext(args.dsd)[0] + ".xlsx"
+    guard.check_out([out], force=getattr(args, "force", False), inputs=[args.dsd])
     package = read_dsd(args.dsd)
     doc = parse_contents(package.contents)
     with open(args.dsd, "rb") as f:
         dsd_bytes = f.read()
-    out = args.out or os.path.splitext(args.dsd)[0] + ".xlsx"
     stats = export_xlsx(doc, dsd_bytes, args.dsd, out)
+    guard.remember(out)
+    _note(args, outputs=[out], sheets=stats["sheets"], tables=stats["tables"], paras=stats["paras"])
     print(f"내보내기 완료: {out}")
     print(f"  시트 {stats['sheets']}개 / 표 {stats['tables']}개 / 문단 {stats['paras']}개")
     print("  A열(숨김)의 행 ID는 재변환 기준이므로 편집하지 마세요.")
     return 0
 
 
+def _import_changes(report) -> dict:
+    out = {}
+    for name in ("cell_edits", "row_inserts", "row_deletes", "table_inserts", "table_deletes",
+                 "para_inserts", "para_deletes", "note_inserts", "note_deletes", "renumbered"):
+        v = getattr(report, name)
+        if v:
+            out[name] = list(v)
+    if report.autosum_tables:
+        out["autosum_tables"] = sorted(report.autosum_tables)
+    return out
+
+
 def cmd_import(args) -> int:
-    package, new_contents, report = import_xlsx(args.xlsx)
     out = args.out or os.path.splitext(args.xlsx)[0] + "_수정.dsd"
+    guard.check_out([out], force=getattr(args, "force", False), inputs=[args.xlsx])
+    package, new_contents, report = import_xlsx(args.xlsx)
     write_dsd(out, package, new_contents)
+    guard.remember(out)
+    _note(args, outputs=[out], warnings=report.warnings, changed=report.changed,
+          structural=report.structural, changes=_import_changes(report))
     print(f"재변환 완료: {out}")
     if not report.changed:
         print("  변경 없음 — contents.xml 원본 바이트 그대로 유지됨")
@@ -75,14 +130,24 @@ def cmd_inspect(args) -> int:
     from . import docview
     package = read_dsd(args.dsd)
     doc = parse_contents(package.contents)
-    only = [s for part in (args.section or []) for s in part.split(",") if s.strip()]
-    d = docview.doc_dict(doc, only=only or None, source=os.path.basename(args.dsd),
-                         data=package.contents)
-    if only and not d["sections"]:
-        keys = ", ".join(s.key for s in docview.sections(doc))
-        print(f"오류: 구획 {', '.join(only)} 없음 - 있는 구획: {keys}", file=sys.stderr)
-        return 2
-    text = docview.dumps(d, pretty=args.pretty) if args.json else docview.to_markdown(d)
+    only = [s.strip() for part in (args.section or []) for s in part.split(",") if s.strip()]
+    name = os.path.basename(args.dsd)
+    if only:
+        have = {k for s in docview.sections(doc) for k in (s.key, s.sheet)}
+        missing = [s for s in only if s not in have]
+        if missing:
+            keys = ", ".join(s.key for s in docview.sections(doc))
+            print(f"오류: 구획 {', '.join(missing)} 없음 - 있는 구획: {keys}", file=sys.stderr)
+            return 2
+    if args.find:
+        d = docview.find_dict(doc, args.find, only=only or None, source=name, limit=args.limit)
+        text = docview.dumps(d, pretty=args.pretty) if args.json else docview.find_markdown(d)
+    elif args.outline:
+        d = docview.outline_dict(doc, only=only or None, source=name, data=package.contents)
+        text = docview.dumps(d, pretty=args.pretty) if args.json else docview.outline_markdown(d)
+    else:
+        d = docview.doc_dict(doc, only=only or None, source=name, data=package.contents)
+        text = docview.dumps(d, pretty=args.pretty) if args.json else docview.to_markdown(d)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(text)
@@ -126,6 +191,7 @@ def cmd_apply(args) -> int:
     outputs = []
     if not args.dry_run:
         write_dsd(out, package, res.contents)
+        guard.remember(out)
         outputs.append(out)
     if args.json:
         return R.emit(R.envelope("apply", R.OK, outputs=outputs, warnings=warnings,
@@ -217,6 +283,7 @@ def cmd_dart(args) -> int:
         outputs += [rd, rx]
         roll = {"자동확정": rep.count("자동확정"), "확인필요": rep.count("확인필요"),
                 "미처리": rep.count("미처리"), "painted": n_paint}
+    guard.remember(*outputs)
     src = got.filing.to_dict() if got.filing else {"rcept_no": None}
     src.update({"file": got.part.filename, "acode": b.acode, "document": got.part.name})
     if args.json:
@@ -241,7 +308,10 @@ def cmd_dart(args) -> int:
 
 
 def cmd_verify(args) -> int:
-    for line in diff_dsd(args.a, args.b):
+    lines = diff_dsd(args.a, args.b)
+    diffs = [ln for ln in lines if ln != "구조·텍스트 차이 없음"]
+    _note(args, same=not diffs, differences=diffs)
+    for line in lines:
         print(line)
     return 0
 
@@ -311,7 +381,7 @@ def cmd_check(args) -> int:
         n_sugg = len([t for t in carried if t.status == "suggested"]) + len(new_sugg)
         display_points = ties_mod.resolve_points(doc, carried + new_sugg, profile)
 
-    if args.json_out:
+    if args.json_out and args.json_out != "-":
         import json as _json
 
         from .jsonout import build_review_json
@@ -331,7 +401,8 @@ def cmd_check(args) -> int:
         except PermissionError:
             print(f"오류: {path} 이(가) 엑셀에서 열려 있어 기록할 수 없습니다. "
                   f"파일을 닫고 다시 실행하세요.", file=sys.stderr)
-            return 1
+            return 2
+        _note(args, outputs=[path])
         print(f"검증 결과 기록: {path}")
         print(f"  각 표 오른쪽 '검증' 열 {stats['cells']}개 셀 — 일치 TRUE / 불일치 차이 금액")
         print(f"  '검증요약' 시트: 검사별 집계 + 불일치 {stats['bad']}건 목록(셀 링크)")
@@ -342,6 +413,7 @@ def cmd_check(args) -> int:
         print(f"\n대사 제안 {n_sugg}건 — xlsx로 check하면 '대사맵' 시트에서 확정할 수 있습니다.")
     if args.out:
         stats = write_report(report, args.out, target_xlsx=path if is_xlsx else None)
+        _note(args, outputs=[args.out])
         print(f"별도 검증 리포트 저장: {args.out} ({stats['results']}개 항목)")
 
     order = {"error": 0, "warn": 1, "info": 2}
@@ -374,7 +446,32 @@ def cmd_check(args) -> int:
                     " — " + ", ".join(f"{c['context']}·{c['table']}" for c in uncov[:5])
         print(line)
     print(f"\n총 {total_issues}건 검출. 모든 결과는 참고용 — 최종 확인은 DART 편집기에서.")
-    return 0
+    shown = [f for f in report.findings if only is None or f.check in only]
+    n_bad = sum(1 for f in shown if f.level in ("warn", "error"))
+    _note(args, counts={k: report.counts.get(k, 0) for k in CHECK_NAMES if only is None or k in only},
+          findings=[{"check": f.check, "level": f.level, "where": f.where, "message": f.message}
+                    for f in shown],
+          mismatches=[{"check": r.check, "section": r.context, "table": r.table_id, "row": r.row_id,
+                       "label": r.row_label, "col": r.grid_col, "header": r.col_header,
+                       "stated": _num(r.stated), "computed": _num(r.computed), "note": r.note}
+                      for r in report.results if not r.ok and (only is None or r.check in only)],
+          suppressed=len(report.suppressed), tie_suggestions=n_sugg, log=False,
+          coverage={"tables": len(report.coverage),
+                    "checked": sum(1 for c in report.coverage if c["checks"]),
+                    "unchecked": [c["table"] for c in report.coverage
+                                  if not c["skipped"] and not c["checks"]]})
+    return 1 if (_envelope(args) and n_bad) else 0
+
+
+def _num(v):
+    """Decimal 등 → JSON 숫자."""
+    if v is None or isinstance(v, (int, float, str, bool)):
+        return v
+    try:
+        f = float(v)
+        return int(f) if f == int(f) else f
+    except (TypeError, ValueError):
+        return str(v)
 
 
 def cmd_annotate_ai(args) -> int:
@@ -389,7 +486,7 @@ def cmd_annotate_ai(args) -> int:
     findings = data.get("findings", [])
     if not isinstance(findings, list):
         print("findings.json 형식 오류 — {'findings': [...]} 필요", file=sys.stderr)
-        return 1
+        return 2
     _, contents, imp = import_xlsx(args.xlsx)
     doc = parse_contents(contents)
     try:
@@ -397,7 +494,8 @@ def cmd_annotate_ai(args) -> int:
     except PermissionError:
         print(f"오류: {args.xlsx} 이(가) 엑셀에서 열려 있어 기록할 수 없습니다.",
               file=sys.stderr)
-        return 1
+        return 2
+    _note(args, outputs=[args.xlsx], findings=stats["findings"])
     warns = sum(1 for x in findings if x.get("severity") == "warn")
     print(f"AI 검토 기록: {args.xlsx} — 'AI검토' 시트 {stats['findings']}건 "
           f"(warn {warns} / info {stats['findings'] - warns})")
@@ -423,6 +521,10 @@ def cmd_refoot(args) -> int:
     report = run_checks(doc, profile=profile)
     items, skips = rf.refoot_plan(doc, report, imp.row_positions, profile)
 
+    _note(args, applied=bool(args.apply and items),
+          items=[{"section": it.context, "label": it.label, "sheet": it.sheet, "xlsx_row": it.xlsx_row,
+                  "old": _num(it.old), "new": _num(it.new), "check": it.check} for it in items],
+          skipped=[{"section": s.context, "label": s.label, "reason": s.reason} for s in skips])
     for s in skips[:12]:
         print(f"[보류] {s.context} '{s.label}': {s.reason}")
     if len(skips) > 12:
@@ -440,9 +542,17 @@ def cmd_refoot(args) -> int:
         except PermissionError:
             print(f"오류: {args.xlsx} 이(가) 엑셀에서 열려 있어 기입할 수 없습니다.",
                   file=sys.stderr)
-            return 1
+            return 2
+        _note(args, outputs=[args.xlsx])
         print(f"\n{n}건 기입 완료 — `dsdxlsx check` 재실행으로 검산하세요.")
     return 0
+
+
+def _roll_paths(dsd_path: str, out: str | None, suffix: str) -> tuple[str, str]:
+    base = os.path.splitext(out or dsd_path)[0]
+    if not out:
+        base += suffix
+    return base + ".dsd", base + ".xlsx"
 
 
 def run_rollforward(dsd_path: str, out: str | None = None, profile_name: str | None = None):
@@ -464,10 +574,7 @@ def run_rollforward(dsd_path: str, out: str | None = None, profile_name: str | N
     rolled = splice.apply(package.contents, ops)
     parse_contents(rolled)  # well-formedness
 
-    base = os.path.splitext(out or dsd_path)[0]
-    if not out:
-        base += "_차기기초"
-    out_dsd, out_xlsx = base + ".dsd", base + ".xlsx"
+    out_dsd, out_xlsx = _roll_paths(dsd_path, out, "_차기기초")
     write_dsd(out_dsd, package, rolled)
     doc2 = parse_contents(rolled)
     with open(out_dsd, "rb") as f:
@@ -479,13 +586,27 @@ def run_rollforward(dsd_path: str, out: str | None = None, profile_name: str | N
         n_paint = rf.paint_moved(out_xlsx, doc2, report.painted,
                                  imp2.row_positions)
     rf.write_roll_sheet(out_xlsx, report)
+    guard.remember(out_dsd, out_xlsx)
     return out_dsd, out_xlsx, report, n_paint
+
+
+def _roll_counts(report) -> dict:
+    return {g: report.count(g) for g in ("자동확정", "확인필요", "미처리")}
+
+
+def _roll_todo(report) -> list:
+    return [{"grade": i.grade, "where": i.where, "item": i.item, "note": i.note}
+            for i in report.items if i.grade != "자동확정"]
 
 
 def cmd_rollforward(args) -> int:
     """전기 DSD → 당기 기초 DSD + 표준 정산표(xlsx, '롤포워드' 리포트 시트 포함)."""
+    guard.check_out(_roll_paths(args.dsd, args.out, "_차기기초"), force=getattr(args, "force", False),
+                    inputs=[args.dsd])
     out_dsd, out_xlsx, report, n_paint = run_rollforward(
         args.dsd, args.out, getattr(args, "profile", None))
+    _note(args, outputs=[out_dsd, out_xlsx], counts=_roll_counts(report), painted=n_paint,
+          todo=_roll_todo(report))
 
     print(f"롤포워드 완료: {out_xlsx} (당기 기초 DSD: {out_dsd})")
     if n_paint:
@@ -548,16 +669,16 @@ def cmd_roll_interim(args) -> int:
             print(f"  [주의] 전기 감사보고서 DSD 기간이 {pc.label} — {target.year - 1}년 연차가 아님",
                   file=sys.stderr)
 
+    out_dsd, out_xlsx = _roll_paths(args.dsd, args.out, "_당전기밀기")
+    guard.check_out([out_dsd, out_xlsx], force=getattr(args, "force", False),
+                    inputs=[args.dsd, getattr(args, "prior_same", None),
+                            getattr(args, "prior_annual", None)])
     inp = ri.RollInputs(doc=doc, base=base, target=target, doc_b=doc_b, doc_c=doc_c,
                         use_dart=not getattr(args, "no_dart", False), company=company)
     ops, report, dreport = ri.roll_interim_ops(inp, profile)
     rolled = splice.apply(package.contents, ops)
     parse_contents(rolled)  # well-formedness
 
-    out_base = os.path.splitext(args.out or args.dsd)[0]
-    if not args.out:
-        out_base += "_당전기밀기"
-    out_dsd, out_xlsx = out_base + ".dsd", out_base + ".xlsx"
     write_dsd(out_dsd, package, rolled)
     doc2 = parse_contents(rolled)
     with open(out_dsd, "rb") as f:
@@ -569,6 +690,13 @@ def cmd_roll_interim(args) -> int:
         n_paint = rf.paint_moved(out_xlsx, doc2, report.painted, imp2.row_positions)
     rf.write_roll_sheet(out_xlsx, report)
     ri.write_dart_sheet(out_xlsx, dreport)
+    guard.remember(out_dsd, out_xlsx)
+    _note(args, outputs=[out_dsd, out_xlsx], counts=_roll_counts(report), painted=n_paint,
+          period={"from": base.label, "to": target.label,
+                  "side": "연결" if base.consolidated else "별도"},
+          dart=({"skipped": dreport.skipped_reason} if dreport.skipped_reason else
+                {v: dreport.count(v) for v in ("일치", "불일치", "미매칭", "채움")}),
+          todo=_roll_todo(report))
 
     print(f"당전기 밀기 완료: {out_xlsx} (다음 분기 DSD: {out_dsd})")
     print(f"  기간: {base.label} → {target.label}"
@@ -618,6 +746,9 @@ def cmd_renumber(args) -> int:
         print("--map \"15:16,16:17\" 또는 --close-gap 중 하나를 지정하세요.",
               file=sys.stderr)
         return 2
+    out = args.out or os.path.splitext(args.dsd)[0] + "_재번호.dsd"
+    guard.check_out([out], force=getattr(args, "force", False), inputs=[args.dsd])
+    _note(args, notes=nums, mapping={str(k): v for k, v in sorted(mapping.items())})
     print(f"주석 현황: {nums}")
     if not mapping:
         print("변경 없음 — 매핑이 비어 있습니다 (번호 공백 없음).")
@@ -631,16 +762,19 @@ def cmd_renumber(args) -> int:
     if rn.c4_signature(doc2, profile) != sig_before:
         print("오류: 재번호 후 재무제표↔주석 대사(C4) 결과가 달라짐 — "
               "동형성 게이트 실패, 파일을 만들지 않습니다.", file=sys.stderr)
-        return 1
+        return 2
     if rep.mentions:
         print(f"\n확인 필요 — 서술문 멘션 {len(rep.mentions)}건 (자동 치환하지 않음):")
         for m in rep.mentions:
             print(f"  - {m}")
         if args.strict:
             print("--strict: 미확인 멘션이 있어 중단합니다.", file=sys.stderr)
-            return 1
-    out = args.out or os.path.splitext(args.dsd)[0] + "_재번호.dsd"
+            _note(args, mentions=list(rep.mentions))
+            return 3
     write_dsd(out, package, new_contents)
+    guard.remember(out)
+    _note(args, outputs=[out], mentions=list(rep.mentions), headings=list(rep.headings),
+          ref_cells=list(rep.ref_cells))
     print(f"\n재번호 완료: {out}")
     print(f"  헤딩 치환 {len(rep.headings)}건: " + "; ".join(rep.headings[:6]))
     if rep.ref_cells:
@@ -700,7 +834,7 @@ def cmd_calibrate(args) -> int:
         if not company:
             print("\n오류: 회사명을 알 수 없어 --write 불가 — --profile 회사명 지정",
                   file=sys.stderr)
-            return 1
+            return 2
         path = company_dir(company) / "profile.toml"
         path.parent.mkdir(parents=True, exist_ok=True)
         header = "" if path.exists() else f'[meta]\nname = "{company}"\n'
@@ -749,6 +883,8 @@ def cmd_disc(args) -> int:
     if res["unmatched_notes"]:
         print("대응 없는 주석: " + ", ".join(f"{n}.{t}" for n, t in res["unmatched_notes"]))
     print(f"저장: {res['out']}")
+    _note(args, outputs=[str(res["out"])], form=res["form"], listed=bool(res["listed"]),
+          interim=bool(res["interim"]), counts=dict(c), warnings=list(res["warns"]))
     return 0
 
 
@@ -762,7 +898,7 @@ def cmd_ties_save(args) -> int:
     if not sheet:
         print("대사맵 시트가 없거나 비어 있음 — 먼저 `dsdxlsx check 파일.xlsx`를 실행하세요.",
               file=sys.stderr)
-        return 1
+        return 2
     company = args.profile
     if not company:
         package, _, _ = import_xlsx(args.xlsx)
@@ -772,7 +908,7 @@ def cmd_ties_save(args) -> int:
             company = None
     if not company:
         print("회사명을 알 수 없음 — `--profile 회사명`으로 지정하세요.", file=sys.stderr)
-        return 1
+        return 2
     path = ties_mod.ties_path(company)
     saved = ties_mod.load_ties(path)
     merged = ties_mod.merge_sheet_state(saved, sheet)
@@ -780,6 +916,7 @@ def cmd_ties_save(args) -> int:
     ties_mod.save_ties(path, keep, company)
     n_conf = sum(1 for t in keep if t.status == "confirmed")
     n_supp = len(keep) - n_conf
+    _note(args, outputs=[str(path)], confirmed=n_conf, excluded=n_supp)
     print(f"대사맵 저장: {path}")
     print(f"  확정 {n_conf}건 / 제외 {n_supp}건 (제안은 저장하지 않음 — 매 check마다 재생성)")
     print("  ⚠ profiles/ 는 고객사명 포함 — 커밋 금지(.gitignore 적용됨)")
@@ -822,7 +959,7 @@ def cmd_recon(args) -> int:
     if not sheets:
         print("오류: 조서에서 재무제표·주석 시트를 못 찾음 — --fs-sheets / --note-sheets 로 지정하세요",
               file=sys.stderr)
-        return 1
+        return 2
     wrote = False
     if args.config and not conf:
         auto = R.sheet_config(sheets)
@@ -839,7 +976,7 @@ def cmd_recon(args) -> int:
         stats = R.write_recon_report(rep, out, path, args.workpaper)
     except PermissionError:
         print(f"오류: {out} 이(가) 엑셀에서 열려 있어 저장할 수 없습니다.", file=sys.stderr)
-        return 1
+        return 2
     print(f"\n보고기간 {rep.period}({side}) — 대사 {stats['items']}칸 (0 칸 {rep.zero_skipped}개 생략)")
     for w in rep.warnings:
         print(f"  [주의] {w}")
@@ -858,14 +995,21 @@ def cmd_recon(args) -> int:
     if wrote:
         print(f"\n건별 설정 저장({side}): {args.config} - 시트 지정 · 빼는 칸 · 이름 다른 행을 고쳐 쓰세요")
     print(f"\n결과 저장: {out}")
-    if args.json_out:
+    summary = {"period": rep.period, "side": side, "items": stats["items"], "issues": stats["issues"],
+               "counts": {v: rep.count(v) for v in R.VERDICTS}, "config_written": wrote,
+               "sheets": [s.name for s in sheets]}
+    _note(args, outputs=[out] + ([args.config] if wrote else []), warnings=rep.warnings,
+          to_check=[{"verdict": x.verdict, "sheet": x.sheet, "label": x.label, "col": x.col,
+                     "period": x.period, "dsd": _num(x.dsd), "workpaper": _num(x.wp_in_unit),
+                     "where": x.where} for x in issues[:200]], **summary)
+    if args.json_out and args.json_out != "-":
         with open(args.json_out, "w", encoding="utf-8") as f:
             json.dump({"out": os.path.abspath(out), "period": rep.period, "side": side,
                        "items": stats["items"], "issues": stats["issues"],
                        "counts": {v: rep.count(v) for v in R.VERDICTS},
                        "warnings": rep.warnings, "config_written": wrote,
                        "sheets": [s.name for s in sheets]}, f, ensure_ascii=False, indent=2)
-    return 0
+    return 1 if (_envelope(args) and issues) else 0
 
 
 def _recon_inputs(args, doc):
@@ -897,17 +1041,24 @@ def cmd_fill(args) -> int:
     side, conf, sheets = _recon_inputs(args, doc)
     if not sheets:
         print("오류: 조서에서 재무제표 · 주석 시트를 못 찾음 - recon --config 설정을 확인하세요", file=sys.stderr)
-        return 1
-    ops, rep = F.fill_ops(doc, sheets, R.ReconConfig.from_dict(conf), keep_filled=args.keep_filled)
+        return 2
     out = args.out or os.path.splitext(args.file)[0] + "_채움.dsd"
+    guard.check_out([out], force=getattr(args, "force", False), inputs=[args.file])
+    ops, rep = F.fill_ops(doc, sheets, R.ReconConfig.from_dict(conf), keep_filled=args.keep_filled)
     filled = splice.apply(package.contents, ops)
     parse_contents(filled)                       # well-formedness
     write_dsd(out, package, filled)
+    guard.remember(out)
     report = args.report or os.path.splitext(out)[0] + "_채움결과.xlsx"
     try:
         F.write_fill_report(rep, report, args.file, args.workpaper)
     except PermissionError:
         report = "(결과 엑셀이 열려 있어 저장 못 함)"
+    unfilled = [x for x in rep.items if x.verdict == "못 채움"]
+    _note(args, outputs=[out] + ([report] if os.path.exists(report) else []), warnings=rep.warnings,
+          period=rep.period, side=side, counts={"채움": rep.count("채움"), "못 채움": len(unfilled)},
+          unfilled=[{"sheet": x.sheet, "label": x.label, "col": x.col, "how": x.how}
+                    for x in unfilled[:200]])
     print(f"보고기간 {rep.period}({side}) - 채움 {rep.count('채움')}칸 · 못 채움 {rep.count('못 채움')}칸")
     for w in rep.warnings:
         print(f"  [주의] {w}")
@@ -915,7 +1066,7 @@ def cmd_fill(args) -> int:
         print(f"  (못 채움) [{x.sheet}] {x.label[:24]} × {x.col[:16]}: {x.how}")
     print(f"\nDSD 저장: {out}\n결과: {report}")
     print("다음: dsdxlsx recon 으로 대사 · dsdxlsx check 로 합계 검산")
-    return 0
+    return 1 if (_envelope(args) and unfilled) else 0
 
 
 def cmd_build(args) -> int:
@@ -937,11 +1088,13 @@ def cmd_build(args) -> int:
     side, conf, sheets = _recon_inputs(args, parse_contents(package.contents))
     if not sheets:
         print("오류: 정산표에서 재무제표 · 주석 시트를 못 찾음 - --config 설정을 확인하세요", file=sys.stderr)
-        return 1
+        return 2
     recipe = B.load_recipe(args.recipe)
     rep = B.build(args.file, args.workpaper, out, recipe=recipe, fill_conf=conf, side_sheets=sheets,
                   workdir=args.workdir)
     B.save_last_build(out)
+    guard.remember(out)
+    _note(args, outputs=[out], warnings=rep.warnings, side=side, steps=list(rep.steps))
     print(f"build({side}) - " + " · ".join(rep.steps))
     for w in rep.warnings[:40]:
         print(f"  [주의] {w}")
@@ -950,10 +1103,11 @@ def cmd_build(args) -> int:
         return 0
     base = os.path.splitext(out)[0]
     print("\n── 대사(recon) ──")
-    cmd_recon(argparse.Namespace(file=out, workpaper=args.workpaper, config=args.config, fs_sheets=None,
-                                 note_sheets=None, prior=False, out=base + "_조서대사.xlsx", json_out=None))
+    cmd_recon(argparse.Namespace(cmd="recon", file=out, workpaper=args.workpaper, config=args.config,
+                                 fs_sheets=None, note_sheets=None, prior=False,
+                                 out=base + "_조서대사.xlsx", json_out=None))
     print("\n── 검산(check) ──")
-    return cmd_check(argparse.Namespace(file=out, only=None, profile=None, json_out=None,
+    return cmd_check(argparse.Namespace(cmd="check", file=out, only=None, profile=None, json_out=None,
                                         out=base + "_검증.xlsx"))
 
 
@@ -973,9 +1127,120 @@ def cmd_diff(args) -> int:
         f.write(D.render_html(d, labels, (os.path.basename(args.a), os.path.basename(args.b),
                                           os.path.basename(args.base) if args.base else None), view=args.view))
     s = D.summary(changes)
+    _note(args, outputs=[out], total=s["total"],
+          by_kind={D.KINDS[k][0]: n for k, n in s["by_kind"].items()})
     print(f"바뀐 곳 {s['total']}건 - " + " · ".join(f"{D.KINDS[k][0]} {n}" for k, n in s["by_kind"].items()))
     print(f"보고서: {out}")
     return 0
+
+
+HELP_GROUPS = """\
+하는 일로 찾기
+  바꾸기        export(DSD → 엑셀)  import(엑셀 → DSD)  dart(DART 공시 → DSD)
+  검산          check(합계·대사·표기)  refoot(상위 합계 다시 계산)  recheck  calibrate  ties
+  다음 기간     rollforward(연차)  roll-interim(분·반기)  renumber(주석 번호)
+  조서와 맞추기 recon(대사)  fill(당기 칸 채움)  build(정산표로 다시 만들기)  disc(8400 점검표)
+  두 판 비교    diff(HTML 보고서)  verify(구조 비교)
+  엑셀 없이     inspect(읽기·목차·찾기)  apply(JSON 편집)  annotate-ai(AI 검토 기록)
+
+명령마다 -h 로 옵션을 본다. --json 을 주면 결과를 JSON 봉투로 낸다(docs/JSON형식.md).
+종료코드: 0 정상 / 1 확인할 것 있음 / 2 입력 오류 / 3 안전장치로 멈춤(아무것도 쓰지 않음)
+"""
+
+
+def _fix_json_flag(argv: list[str]) -> list[str]:
+    """check·recon 의 --json 은 경로를 받을 수도(옛 방식) 안 받을 수도(봉투) 있다.
+    --json 바로 뒤가 .json 경로가 아니면 봉투로 읽는다(뒤따르는 파일 인자를 삼키지 않게)."""
+    if not argv or argv[0] not in ("check", "recon"):
+        return argv
+    out = []
+    for i, a in enumerate(argv):
+        out.append(a)
+        if a == "--json":
+            nxt = argv[i + 1] if i + 1 < len(argv) else None
+            if nxt is None or not nxt.lower().endswith(".json"):
+                out.append("-")
+    return out
+
+
+def _explain(e: Exception) -> str:
+    """예외 → 사람이 읽을 한 줄."""
+    import json
+    import zipfile
+
+    name = getattr(e, "filename", None)
+    if isinstance(e, FileNotFoundError):
+        return f"파일이 없다: {name or e}"
+    if isinstance(e, PermissionError):
+        return (f"파일을 쓰거나 읽을 수 없다: {name or e} - 엑셀이나 DART 편집기에서 열려 있으면 "
+                "닫고 다시 실행해야 한다")
+    if isinstance(e, zipfile.BadZipFile):
+        return "파일이 깨졌거나 DSD·엑셀 형식이 아니다"
+    if isinstance(e, json.JSONDecodeError):
+        return f"JSON 형식 오류: {e}"
+    if type(e).__name__ == "InvalidFileException":
+        return "엑셀(.xlsx) 파일이 아니다"
+    return str(e)
+
+
+def _check_inputs(args) -> None:
+    for name, want in INPUTS.get(args.cmd, {}).items():
+        path = getattr(args, name, None)
+        if not path:
+            continue
+        guard.need(path, want)
+    if args.cmd == "disc" and not args.file.lower().endswith(".json"):
+        guard.need(args.file, "dsd")
+
+
+def _run(args) -> int:
+    """입력 점검 → 명령 실행 → 오류를 한 줄로. --json 이면 결과를 봉투로 감싼다."""
+    import zipfile
+
+    from openpyxl.utils.exceptions import InvalidFileException
+
+    from . import result as R
+
+    env = _envelope(args)
+    capture = env and args.cmd not in SELF_EMIT
+    so, se = io.StringIO(), io.StringIO()
+    err = None
+    code = R.OK
+    known = (guard.InputError, ImportError_, DsdParseError, OSError, ValueError, zipfile.BadZipFile,
+             InvalidFileException)
+    try:
+        _check_inputs(args)
+        if capture:
+            with contextlib.redirect_stdout(so), contextlib.redirect_stderr(se):
+                code = args.func(args)
+        else:
+            code = args.func(args)
+    except guard.Stopped as e:
+        code, err = R.STOPPED, f"멈춤: {e}"
+    except known as e:
+        code, err = R.INPUT_ERROR, f"오류: {_explain(e)}"
+    except Exception as e:  # noqa: BLE001 - 봉투를 내는 실행은 표준출력이 JSON 이어야 한다
+        if not env:
+            raise
+        code, err = R.INPUT_ERROR, f"내부 오류: {type(e).__name__}: {e}"
+    if not env:
+        if err:
+            print(err, file=sys.stderr)
+        return code
+    if args.cmd in SELF_EMIT:
+        if err:
+            return R.emit(R.envelope(args.cmd, code, errors=[err.split(": ", 1)[-1]]))
+        return code
+    res = getattr(args, "_res", {"outputs": [], "warnings": [], "extra": {}})
+    said = [ln.strip() for ln in se.getvalue().splitlines() if ln.strip()]
+    errors = ([err.split(": ", 1)[-1]] if err else []) + (said if code >= R.INPUT_ERROR else [])
+    warnings = list(res["warnings"]) + ([] if code >= R.INPUT_ERROR else said)
+    extra = dict(res["extra"])
+    if extra.pop("log", True):               # 구조화한 결과가 충분한 명령(check)은 사람용 줄을 싣지 않는다
+        extra["log"] = [ln.rstrip() for ln in so.getvalue().splitlines() if ln.strip()]
+    name = args.cmd + (" " + args.tcmd if args.cmd == "ties" else "")
+    return R.emit(R.envelope(name, code, outputs=res["outputs"], warnings=warnings, errors=errors,
+                             **extra))
 
 
 def main(argv=None) -> int:
@@ -983,25 +1248,35 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(
         prog="dsdxlsx",
         description="DART DSD ↔ XLSX 왕복 변환 (무수정 부분 바이트 보존)",
+        epilog=HELP_GROUPS, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     from . import __version__
     ap.add_argument("--version", action="version", version=f"dsdxlsx {__version__}")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=True, metavar="명령")
 
     p = sub.add_parser("export", help="DSD → XLSX 내보내기")
     p.add_argument("dsd")
-    p.add_argument("-o", "--out")
+    p.add_argument("-o", "--out", help="출력 엑셀(기본: <이름>.xlsx)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("import", help="편집한 XLSX → DSD 재변환")
     p.add_argument("xlsx")
-    p.add_argument("-o", "--out")
+    p.add_argument("-o", "--out", help="출력 DSD(기본: <이름>_수정.dsd)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("inspect", help="DSD 를 칸 ID·행 이름·열 머리글과 함께 마크다운이나 JSON 으로 펼침(LLM 읽기용)")
     p.add_argument("dsd")
     p.add_argument("--section", action="append",
                    help="이 구획만(재무제표 명칭 또는 주석 번호, 쉼표로 여러 개, 반복 가능)")
+    p.add_argument("--outline", action="store_true",
+                   help="목차만: 구획마다 표·문단 ID 와 크기(큰 문서에서 먼저 볼 것)")
+    p.add_argument("--find", action="append", metavar="글",
+                   help="이 글이 든 문단·행·칸의 위치(ID)만(숫자는 값으로도 찾음, 반복 가능)")
+    p.add_argument("--limit", type=int, default=200, help="--find 결과 최대 건수(기본 200)")
     p.add_argument("--json", action="store_true", help="JSON 으로(기본: 마크다운)")
     p.add_argument("--pretty", action="store_true", help="JSON 들여쓰기")
     p.add_argument("-o", "--out", help="저장 경로(기본: 표준출력)")
@@ -1039,11 +1314,13 @@ def main(argv=None) -> int:
     p.add_argument("-o", "--out", help="저장 경로(기본: B 폴더에 <A>_vs_<B>_비교.html)")
     p.add_argument("--view", choices=("side", "cards"), default="side",
                    help="처음 여는 화면: side=두 판 나란히(기본) · cards=바뀐 곳만 (보고서 안 탭으로 바꿀 수 있음)")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_diff)
 
     p = sub.add_parser("verify", help="두 DSD 파일 구조 비교")
     p.add_argument("a")
     p.add_argument("b")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_verify)
 
     p = sub.add_parser("disc", help="공시사항점검표(한공회 8400) 자동 작성 — 해당여부·주석번호")
@@ -1054,6 +1331,7 @@ def main(argv=None) -> int:
     p.add_argument("--company", help="회사명(기본: 본문에서 추출)")
     p.add_argument("--period-end", help="결산일 YYYY-MM-DD(기본: 본문에서 추출)")
     p.add_argument("--kicpa-dir", help="한공회 표준조서 폴더(기본: KICPA_FORMS 환경변수)")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_disc)
 
     p = sub.add_parser("check", help="합계·대사·표기 정합성 검증 (.dsd 또는 export한 .xlsx)")
@@ -1062,8 +1340,9 @@ def main(argv=None) -> int:
     p.add_argument("--profile",
                    help="검증 프로파일: 회사명 또는 profile.toml 경로 "
                         "(기본: meta.xml 회사명으로 profiles/ 자동 탐색)")
-    p.add_argument("--json", dest="json_out",
-                   help="리뷰용 구조화 JSON 저장 경로 — AI 검토(/dsd-review) 입력")
+    p.add_argument("--json", dest="json_out", nargs="?", const="-", metavar="경로",
+                   help="경로 없이 주면 결과를 JSON 봉투로(표준출력, 불일치가 있으면 종료코드 1). "
+                        "경로를 주면 리뷰용 구조화 JSON 을 그 파일로 — AI 검토(/dsd-review) 입력")
     p.add_argument("-o", "--out", help="검증 결과 엑셀 경로 (기본: <대상>_검증.xlsx)")
     p.set_defaults(func=cmd_check)
 
@@ -1080,7 +1359,9 @@ def main(argv=None) -> int:
     p.add_argument("--config",
                    help="건별 설정 JSON(시트 지정 · 빼는 칸 · 이름 다른 행, '별도' · '연결' 구역) - "
                         "없으면 자동 판정 결과를 이 파일로 써 줌")
-    p.add_argument("--json", dest="json_out", help="요약 JSON 저장 경로 (xlaudit 리본이 읽음)")
+    p.add_argument("--json", dest="json_out", nargs="?", const="-", metavar="경로",
+                   help="경로 없이 주면 결과를 JSON 봉투로(표준출력, 확인 필요가 있으면 종료코드 1). "
+                        "경로를 주면 요약 JSON 을 그 파일로 (xlaudit 리본이 읽음)")
     p.add_argument("-o", "--out", help="결과 엑셀 경로 (기본: <대상>_조서대사.xlsx)")
     p.set_defaults(func=cmd_recon)
 
@@ -1094,6 +1375,8 @@ def main(argv=None) -> int:
     p.add_argument("--keep-filled", action="store_true", help="값이 있는 당기 칸은 그대로 두고 빈 칸만 (기본: 덮어씀)")
     p.add_argument("--report", help="결과 엑셀 경로 (기본: <출력>_채움결과.xlsx)")
     p.add_argument("-o", "--out", help="출력 .dsd (기본: <대상>_채움.dsd)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_fill)
 
     p = sub.add_parser(
@@ -1108,6 +1391,7 @@ def main(argv=None) -> int:
     p.add_argument("--no-check", action="store_true", help="빌드 뒤 대사 · 검산 생략")
     p.add_argument("--workdir", help="중간 파일(채움 · 레시피 엑셀)을 남길 폴더 (기본: 임시 폴더)")
     p.add_argument("-o", "--out", help="출력 .dsd (기본: <뼈대>_빌드.dsd)")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_build)
 
     p = sub.add_parser(
@@ -1116,6 +1400,7 @@ def main(argv=None) -> int:
     )
     p.add_argument("xlsx")
     p.add_argument("findings", help="/dsd-review 스킬이 만든 findings.json")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_annotate_ai)
 
     p = sub.add_parser(
@@ -1123,6 +1408,7 @@ def main(argv=None) -> int:
         help="annotate된 xlsx의 검산 수식을 Excel 없이 재평가 (헤드리스, OfficeCLI 필요)",
     )
     p.add_argument("xlsx")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_recheck)
 
     p = sub.add_parser(
@@ -1132,6 +1418,7 @@ def main(argv=None) -> int:
     p.add_argument("xlsx", help="편집 중인 정산표 (export/rollforward 산출)")
     p.add_argument("--apply", action="store_true", help="제안을 실제 셀에 기입")
     p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_refoot)
 
     p = sub.add_parser(
@@ -1141,6 +1428,8 @@ def main(argv=None) -> int:
     p.add_argument("dsd", help="전기(직전 보고서) DSD")
     p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
     p.add_argument("-o", "--out", help="출력 기본 경로 (기본: <이름>_차기기초.*)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_rollforward)
 
     p = sub.add_parser(
@@ -1156,6 +1445,8 @@ def main(argv=None) -> int:
     p.add_argument("--no-dart", action="store_true", help="OpenDART 대사·채움 생략")
     p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
     p.add_argument("-o", "--out", help="출력 기본 경로 (기본: <이름>_당전기밀기.*)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_roll_interim)
 
     p = sub.add_parser(
@@ -1170,6 +1461,8 @@ def main(argv=None) -> int:
                    help="서술문 멘션(수동 확인 항목)이 있으면 중단")
     p.add_argument("--profile", help="검증 프로파일 (기본: meta 회사명)")
     p.add_argument("-o", "--out", help="출력 DSD 경로 (기본: <이름>_재번호.dsd)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_renumber)
 
     p = sub.add_parser(
@@ -1180,6 +1473,7 @@ def main(argv=None) -> int:
     p.add_argument("--profile", help="회사명 (기본: meta.xml 회사명)")
     p.add_argument("--write", action="store_true",
                    help="suppress 초안을 profiles/<회사>/profile.toml에 주석으로 추가")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_calibrate)
 
     p = sub.add_parser("ties", help="대사맵(대사쌍) 관리")
@@ -1189,14 +1483,11 @@ def main(argv=None) -> int:
     )
     ps.add_argument("xlsx")
     ps.add_argument("--profile", help="회사명 (기본: 임베드 원본 meta.xml의 회사명)")
+    ps.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     ps.set_defaults(func=cmd_ties_save)
 
-    args = ap.parse_args(argv)
-    try:
-        return args.func(args)
-    except (ImportError_, DsdParseError, FileNotFoundError, ValueError) as e:
-        print(f"오류: {e}", file=sys.stderr)
-        return 1
+    args = ap.parse_args(_fix_json_flag(list(sys.argv[1:] if argv is None else argv)))
+    return _run(args)
 
 
 if __name__ == "__main__":

@@ -19,6 +19,10 @@ import 와 같은 build_edits → splice 경로로 새 contents.xml 을 만든�
   {"op": "insert_table", "after": "p005", "template": "t005", "header_rows": 1,
    "rows": [["구분", "당기말", "전기말"], ["제품", 10, 20]]}
   {"op": "delete_table", "id": "t005"}
+  {"op": "insert_note", "no": 8, "title": "차입금",
+   "blocks": ["당기말 현재 차입금의 내역은 다음과 같습니다.",
+              {"template": "t005", "header_rows": 1, "rows": [["구분", "당기말", "전기말"], ["단기차입금", 10, 20]]}]}
+  {"op": "delete_note", "no": 6}
 
 열(col)은 grid 열 번호(정수, inspect 의 [번호]), 머리글 글자(공백 무시), "당기"/"전기" 중 하나다.
 칸 ID 끝의 c02 는 행 안 칸 순번이라 열 번호와 다르다.
@@ -40,7 +44,7 @@ from .parse import parse_contents
 ROW_ID_RE = re.compile(r"^t\d{3}\.r\d{3}$")
 CELL_ID_RE = re.compile(r"^(t\d{3}\.r\d{3})\.c\d{2}$")
 OPS = ("set", "set_text", "insert_row", "delete_row", "insert_para", "delete_para",
-       "insert_table", "delete_table")
+       "insert_table", "delete_table", "insert_note", "delete_note")
 
 
 class EditError(Exception):
@@ -375,6 +379,59 @@ def apply_op(doc: Document, book: VirtualBook, op: dict) -> None:
         lines.append(None)
         sheet, k = book.block_end(anchor)
         _insert_after(book, anchor, sheet, k, lines)
+    elif kind == "delete_note":
+        info = _note_info(doc, op.get("no"))
+        if not info.own_heading:
+            raise EditError(f"주석 {info.no} 은 제목이 본문과 한 문단이라 통째로 지울 수 없다 - "
+                            "DART 편집기에서 제목 문단을 나눈 뒤 다시")
+        sheet, k = book.locate(info.heading.id)
+        sheet.lines[k].values = {2: "#주석삭제"}
+    elif kind == "insert_note":
+        try:
+            no = int(op.get("no"))
+        except (TypeError, ValueError):
+            raise EditError(f"insert_note 에 주석 번호 no 가 없다: {op}") from None
+        title = str(op.get("title") or "").strip()
+        if not title:
+            raise EditError(f"insert_note 에 제목 title 이 없다: {op}")
+        blocks = op.get("blocks") or []
+        if not isinstance(blocks, list):
+            raise EditError("insert_note 의 blocks 는 배열이어야 한다(글자 = 문단, 객체 = 표)")
+        lines: list = [VLine(None, {2: f"#새주석 {no} {title}"})]
+        for b in blocks:
+            if isinstance(b, dict) and "text" in b and "rows" not in b:
+                b = b["text"]
+            if isinstance(b, str):
+                if not b.strip():
+                    raise EditError("insert_note 의 문단 글이 비었다")
+                lines.append(VLine(None, {2: "#문단 " + b}))
+                continue
+            rows = b.get("rows") if isinstance(b, dict) else None
+            if not isinstance(rows, list) or not rows or not all(isinstance(r, list) for r in rows):
+                raise EditError("insert_note 의 표는 {template, header_rows, rows} 객체여야 한다")
+            if not b.get("template"):
+                raise EditError("새 주석의 표는 본뜰 기존 표 template(t###)이 필요하다")
+            lines.append(VLine(None, {2: f"#새표 헤더={int(b.get('header_rows', 1))} 원본={b['template']}"}))
+            for r in rows:
+                vals = {2 + c: (_b(v) if c == 0 else v) for c, v in enumerate(r)
+                        if v is not None and v != ""}
+                lines.append(VLine(None, vals or {3: ""}))
+            lines.append(None)
+        used = {sh.sec.sheet for sh in book.sheets}
+        name = str(9000 + no)
+        while name in used:
+            name = str(int(name) + 1000)
+        book.sheets.append(VSheet(SectionInfo(f"새 주석 {no}", name, "note", title, []), lines))
+
+
+def _note_info(doc: Document, no):
+    from . import renumber
+    infos = renumber.note_infos(doc)
+    info = next((i for i in infos if str(i.no) == str(no).strip()), None)
+    if info is None:
+        have = ", ".join(str(i.no) for i in infos) or "없음"
+        raise EditError(f"주석 {no} 없음 - 있는 주석: {have}")
+    return info
 
 
 @dataclass
@@ -386,7 +443,8 @@ class ApplyResult:
         r = self.report
         out = {}
         for name in ("cell_edits", "row_inserts", "row_deletes", "table_inserts",
-                     "table_deletes", "para_inserts", "para_deletes", "renumbered"):
+                     "table_deletes", "para_inserts", "para_deletes", "note_inserts",
+                     "note_deletes", "renumbered"):
             v = getattr(r, name)
             if v:
                 out[name] = list(v)
@@ -436,7 +494,8 @@ def apply_edits(contents: bytes, edits: list[dict]) -> ApplyResult:
     except ImportError_ as e:
         raise EditError(fix(str(e))) from None
     for name in ("cell_edits", "row_inserts", "row_deletes", "table_inserts", "table_deletes",
-                 "para_inserts", "para_deletes", "renumbered", "warnings"):
+                 "para_inserts", "para_deletes", "note_inserts", "note_deletes", "renumbered",
+                 "warnings"):
         setattr(report, name, [fix(s) for s in getattr(report, name)])
     new = splice.apply(contents, ops)
     if report.changed:
