@@ -1,6 +1,6 @@
 """명령 결과 공통 봉투(--json) - LLM·스크립트가 명령마다 다른 출력을 해석하지 않게 한다.
 
-{"schema": "dsdxlsx.result/1", "command": "apply", "version": "0.2.0", "ok": true,
+{"schema": "dsdxlsx.result/1", "command": "apply", "version": "0.3.0", "ok": true,
  "exit_code": 0, "outputs": ["…_수정.dsd"], "warnings": [], "errors": [], …명령별 필드}
 
 종료코드 규약
