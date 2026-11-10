@@ -285,6 +285,26 @@ def _sec_where(sec) -> str:
     return f"주석{sec.note_no}" if sec.note_no else sec.title
 
 
+def _head_mark(t) -> str:
+    """표 머리글 첫 칸이 '당 기' · '전 기' · '당기말' 이면 '당' · '전', 아니면 ''."""
+    if not t.rows or not t.rows[0].cells:
+        return ""
+    txt = re.sub(r"\s", "", t.rows[0].cells[0].text or "")
+    if re.fullmatch(r"당(분|반)?기말?", txt):
+        return "당"
+    if re.fullmatch(r"전(분|반)?기말?", txt):
+        return "전"
+    return ""
+
+
+def _flip_head_clone(doc: Document, cur_t) -> bytes:
+    """구 당기 표 바이트 클론 - 머리글 첫 칸의 '당' 만 '전' 으로."""
+    cell = cur_t.rows[0].cells[0]
+    head = doc.data[cell.inner_start:cell.inner_end]
+    new = head.replace("당".encode("utf-8"), "전".encode("utf-8"), 1)
+    return doc.data[cur_t.start:cell.inner_start] + new + doc.data[cell.inner_end:cur_t.end]
+
+
 def _roll_paired_tables(doc: Document, report: RollReport, ops: list,
                         touched: set, painted: list) -> set[str]:
     """세로형 표 쌍: 'N) 당기말' 문단 아래 표 ↔ 'N) 전기말' 문단 아래 표.
@@ -323,16 +343,19 @@ def _roll_paired_tables(doc: Document, report: RollReport, ops: list,
                 fresh = False
                 continue
             t = block.item
+            if t.ncols == 1 and pending is not None and "단위" in " ".join(c.text or "" for r in t.rows for c in r.cells):
+                continue                       # 표 사이 '(단위: 천원)' 한 칸 표는 쌍을 끊지 않음
             tags = {c.tag for r in t.rows for c in r.cells}
             eligible = ("TU" not in tags and not t.fixtable
                         and t.group_aclass is None and not t.in_insertion)
-            if _CUR_MARK_RE.search(last_mark) and eligible:
-                pending = (t, last_mark)
+            hd = _head_mark(t)                 # 머리글 첫 칸이 '당 기' / '전 기' 인 세로 표 쌍도 같은 처리
+            if _CUR_MARK_RE.search(last_mark) and eligible or (eligible and hd == "당"):
+                pending = (t, last_mark or "머리글 당기")
                 fresh = True
-            elif (_PREV_MARK_RE.search(last_mark) and eligible
+            elif ((_PREV_MARK_RE.search(last_mark) or hd == "전") and eligible
                   and pending is not None and pending[0].ncols == t.ncols):
                 cur_t, cur_mark = pending
-                clone = doc.data[cur_t.start:cur_t.end]
+                clone = _flip_head_clone(doc, cur_t) if hd == "전" else doc.data[cur_t.start:cur_t.end]
                 ops.append(splice.Op(pos=t.start, start=t.start, end=t.end,
                                      payload=clone))
                 for row in t.rows:

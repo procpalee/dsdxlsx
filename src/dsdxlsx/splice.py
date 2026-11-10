@@ -95,8 +95,12 @@ def apply(data: bytes, ops: list[Op]) -> bytes:
     if not ops:
         return data
     ordered = sorted(ops, key=lambda o: (o.pos, o.start), reverse=True)
-    for prev, cur in zip(ordered, ordered[1:]):
+    for i in range(1, len(ordered)):
+        prev, cur = ordered[i - 1], ordered[i]
         if cur.end > prev.start:
+            if not cur.payload and not prev.payload:     # 붙어 있는 표 · 문단 삭제의 앞뒤 빈 줄이 겹침 - 삭제끼리는 잘라서 허용
+                ordered[i] = Op(pos=cur.pos, start=cur.start, end=prev.start, payload=b"")
+                continue
             raise ValueError(f"편집 범위 겹침: [{cur.start},{cur.end}) vs [{prev.start},{prev.end})")
     out = bytearray(data)
     for op in ordered:

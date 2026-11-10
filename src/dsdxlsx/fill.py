@@ -186,6 +186,9 @@ def fill_ops(doc: Document, sheets: list[WpSheet], config: ReconConfig | None = 
                 rate = bool(_RATE_HDR_RE.search(norm(tv.col_header(c))))
                 is3m = bool(_3M_RE.search(_leaf(tv, c)))
                 cands = same_name_rows(keys, own, scope, common, col_keys)
+                exact = [r for r in cands if norm(r.label) == norm(label)]
+                if exact:                          # 이름 글이 똑같은 행이 있으면 그 행만 ('…의 취득' ↔ '…의 처분', 금액 0 인 행도 지킴)
+                    cands = exact
                 if not cands:
                     tot = _total_of(tv, i, c, new_vals) if is_total_label(label) else None
                     if tot is not None:
@@ -216,6 +219,10 @@ def fill_ops(doc: Document, sheets: list[WpSheet], config: ReconConfig | None = 
                 named_rate = [o for o in opts if any(_RATE_HDR_RE.search(k) for k in o[0].names.get(o[1], ()))]
                 if named_rate and len(named_rate) < len(opts):
                     opts = named_rate if rate else [o for o in opts if o not in named_rate]
+                if len(opts) > 1 and pc is not None and tv.cell(i, pc) is not None and (pv == 0 or (pv is None and tv.cell(i, pc).text.strip() in ("-", "\u2013"))):
+                    zero = [o for o in opts if not o[3]]   # 전기 '-' 인 줄 - 조서 전기가 0 인 같은 이름 줄(유동 · 비유동 등)
+                    if zero:
+                        opts = zero
                 if any(o[2] for o in opts) and not all(o[2] == 0 for o in opts):
                     opts = [o for o in opts if o[2]]   # 표 오른쪽 점검 칸(0)은 다른 후보가 있으면 버림
                 if not opts:
