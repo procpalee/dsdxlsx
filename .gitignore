@@ -18,3 +18,4 @@ uv.lock
 calib*.txt
 검증출력/
 tests/sample_exceptions.py
+tests/foot_sample_exceptions.py

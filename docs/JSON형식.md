@@ -184,6 +184,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `import` | `changed`, `structural`, `changes` |
 | `export` | `sheets`, `tables`, `paras` |
 | `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
+| `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error` |
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
 | `fill` | `period`, `side`, `counts`, `unfilled` |
 | `build` | `side`, `steps` |

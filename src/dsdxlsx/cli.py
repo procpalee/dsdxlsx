@@ -307,6 +307,60 @@ def cmd_dart(args) -> int:
     return R.OK
 
 
+def cmd_foot(args) -> int:
+    """풋팅·대사 검증 워크북 - DSD → 합계·대사 수식이 든 엑셀(총괄표 / 원문 / 재무제표 / 주석).
+    종료코드: 0 전부 일치 / 1 풋팅 불일치 있음 / 2 오류 / 3 멈춤(여러 파일이면 가장 나쁜 것)."""
+    from pathlib import Path
+
+    from .foot import pipeline, report
+    from .foot import sections as fsec
+
+    if args.out and len(args.files) > 1:
+        print("오류: -o 는 입력 파일이 하나일 때만 쓸 수 있다", file=sys.stderr)
+        return 2
+    worst = 0
+    results, outputs = [], []
+    for name in args.files:
+        path = Path(name)
+        item = {"file": name}
+        try:
+            guard.need(name, "dsd")
+            if args.sections:
+                package = read_dsd(name)
+                plans = fsec.build(parse_contents(package.contents))
+                print(f"\n[{path.name}] {fsec.company_name(package.meta)}")
+                for pl in plans:
+                    n_tables = sum(1 for b in pl.sec.blocks if b.kind == "table")
+                    print(f"  {pl.name:>4s} | {pl.kind:9s} | 표 {n_tables:2d} | {pl.display_title}")
+                item["sheets"] = [{"name": pl.name, "kind": pl.kind, "title": pl.display_title}
+                                  for pl in plans]
+                rc = 0
+            else:
+                out = Path(args.out) if args.out else pipeline.default_output(path, args.convert_only)
+                guard.check_out([str(out)], force=args.force, inputs=[name])
+                res = pipeline.process_file_full(path, out, convert_only=args.convert_only,
+                                                 relaxed=args.detection_profile == "exhaustive")
+                guard.remember(str(out))
+                outputs.append(str(out))
+                item.update(output=str(out), company=res.company, sheets=res.n_sheets)
+                if not args.convert_only:
+                    item.update(report.summary_dict(res.checkset))
+                rc = res.rc
+        except guard.Stopped as e:
+            print(f"멈춤: {e}", file=sys.stderr)
+            item["error"], rc = str(e), 3
+        except Exception as e:  # noqa: BLE001 - 파일 하나의 오류가 나머지 파일을 막지 않게
+            msg = _explain(e) if isinstance(e, (guard.InputError, OSError, ValueError)) \
+                else f"{type(e).__name__}: {e}"
+            print(f"오류: {path.name}: {msg}", file=sys.stderr)
+            item["error"], rc = msg, 2
+        item["exit_code"] = rc
+        results.append(item)
+        worst = max(worst, rc)
+    _note(args, outputs=outputs, files=results)
+    return worst
+
+
 def cmd_verify(args) -> int:
     lines = diff_dsd(args.a, args.b)
     diffs = [ln for ln in lines if ln != "구조·텍스트 차이 없음"]
@@ -1137,7 +1191,8 @@ def cmd_diff(args) -> int:
 HELP_GROUPS = """\
 하는 일로 찾기
   바꾸기        export(DSD → 엑셀)  import(엑셀 → DSD)  dart(DART 공시 → DSD)
-  검산          check(합계·대사·표기)  refoot(상위 합계 다시 계산)  recheck  calibrate  ties
+  검산          check(합계·대사·표기)  foot(풋팅·대사 검증 워크북)  refoot(상위 합계 다시 계산)
+                recheck  calibrate  ties
   다음 기간     rollforward(연차)  roll-interim(분·반기)  renumber(주석 번호)
   조서와 맞추기 recon(대사)  fill(당기 칸 채움)  build(정산표로 다시 만들기)  disc(8400 점검표)
   두 판 비교    diff(HTML 보고서)  verify(구조 비교)
@@ -1305,6 +1360,19 @@ def main(argv=None) -> int:
     p.add_argument("--force", action="store_true", help="출력 파일이 있어도 덮어씀")
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(종료코드 0/2/3)")
     p.set_defaults(func=cmd_dart)
+
+    p = sub.add_parser("foot", help="풋팅·대사 검증 워크북 - DSD 를 합계·대사 수식이 든 엑셀로"
+                                    "(총괄표 / 원문 / 재무제표 / 주석 시트, 값을 고치면 바로 다시 계산)")
+    p.add_argument("files", nargs="+", help=".dsd 파일(여러 개 가능)")
+    p.add_argument("-o", "--out", help="출력 엑셀(기본: <이름>_풋팅.xlsx, 입력이 하나일 때만)")
+    p.add_argument("--convert-only", action="store_true",
+                   help="검증 수식 없이 시트로 옮기기만(출력: <이름>_변환.xlsx)")
+    p.add_argument("--sections", action="store_true", help="시트 구성만 보여 주고 끝냄")
+    p.add_argument("--detection-profile", choices=("standard", "exhaustive"), default="standard",
+                   help="검출 범위: standard(기본) / exhaustive(±1 절사까지 넓게 - 재판정용)")
+    p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
+    p.set_defaults(func=cmd_foot)
 
     p = sub.add_parser("diff", help="두 DSD 의 보이는 차이를 HTML 보고서로(두 판 나란히 보기 + 바뀐 곳만 카드)")
     p.add_argument("a", help="비교 기준 DSD(예: 우리 판)")
