@@ -350,7 +350,7 @@ def cmd_foot(args) -> int:
         print("오류: -o 는 입력 파일이 하나일 때만 쓸 수 있다", file=sys.stderr)
         return 2
     worst = 0
-    results, outputs = [], []
+    results, outputs, warnings = [], [], []
     for name in args.files:
         path = Path(name)
         item = {"file": name}
@@ -371,12 +371,14 @@ def cmd_foot(args) -> int:
                 guard.check_out([str(out)], force=args.force, inputs=[name])
                 res = pipeline.process_file_full(path, out, convert_only=args.convert_only,
                                                  relaxed=args.detection_profile == "exhaustive")
-                guard.remember(str(out))
                 outputs.append(str(out))
                 item.update(output=str(out), company=res.company, sheets=res.n_sheets)
                 if not args.convert_only:
                     item.update(report.summary_dict(res.checkset))
                 rc = res.rc
+                if args.dart_tie and not args.convert_only:
+                    rc = max(rc, _foot_dart_tie(args, res, item, warnings))
+                guard.remember(str(out))
         except guard.Stopped as e:
             print(f"멈춤: {e}", file=sys.stderr)
             item["error"], rc = str(e), 3
@@ -388,8 +390,30 @@ def cmd_foot(args) -> int:
         item["exit_code"] = rc
         results.append(item)
         worst = max(worst, rc)
-    _note(args, outputs=outputs, files=results)
+    _note(args, outputs=outputs, warnings=warnings, files=results)
     return worst
+
+
+def _foot_dart_tie(args, res, item: dict, warnings: list) -> int:
+    """전기 열을 DART 에 공시된 직전 보고서 원문과 대사해 워크북에 덧붙인다. 불일치가 있으면 1.
+    키가 없거나 공시가 없으면 건너뛰고 사유만 남긴다(0)."""
+    from openpyxl.utils import get_column_letter
+
+    from .foot import darttie
+
+    dres = darttie.run(res.package, res.doc, res.plans, res.ctx, res.placed_rows, fs_div=args.dart_fs)
+    darttie.apply(res.out, dres, res.right_starts or {})
+    darttie.print_summary(dres)
+    item["dart"] = {"status": dres.status, "reason": dres.reason, "total": len(dres.ties),
+                    "pass": dres.n_ok, "fail": dres.n_bad, "sources": list(dres.sources),
+                    "unmatched": list(dres.unmatched)}
+    item.setdefault("mismatches", []).extend(
+        {"kind": "dart", "sheet": t.sheet, "cell": f"{get_column_letter(t.col)}{t.row}",
+         "label": t.label, "header": t.header, "current": _num(t.cur_value),
+         "dart": _num(t.prior_value), "diff": _num(t.diff)} for t in dres.ties if not t.ok)
+    if dres.status == "skipped":
+        warnings.append(f"{os.path.basename(item['file'])}: DART 대사를 건너뜀 - {dres.reason}")
+    return 1 if dres.n_bad else 0
 
 
 def cmd_verify(args) -> int:
@@ -1402,6 +1426,11 @@ def main(argv=None) -> int:
     p.add_argument("--sections", action="store_true", help="시트 구성만 보여 주고 끝냄")
     p.add_argument("--detection-profile", choices=("standard", "exhaustive"), default="standard",
                    help="검출 범위: standard(기본) / exhaustive(±1 절사까지 넓게 - 재판정용)")
+    p.add_argument("--dart-tie", action="store_true",
+                   help="전기 열을 DART 에 공시된 직전 감사·검토보고서 원문과 대사(OpenDART 키 필요, 없으면 "
+                        "건너뜀). 각 시트 오른쪽 'DART:' 칸과 'DART원천' 시트에 남긴다")
+    p.add_argument("--dart-fs", choices=("OFS", "CFS"),
+                   help="DART 대사 대상을 별도(OFS)·연결(CFS)로 강제(기본: 문서에서 판별)")
     p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_foot)

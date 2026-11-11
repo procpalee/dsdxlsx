@@ -184,7 +184,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `import` | `changed`, `structural`, `changes`. 풋팅 워크북이면 `kind: "foot"`, `source`, `changed`, `edits`(cell·node·old·new) |
 | `export` | `sheets`, `tables`, `paras` |
 | `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
-| `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error` |
+| `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error`. `--dart-tie`면 `dart`(status·reason·total·pass·fail·sources·unmatched)가 붙고 `mismatches`에 `kind: "dart"`(current·dart 값 포함)가 더해진다. 건너뛴 사유는 `warnings` |
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
 | `fill` | `period`, `side`, `counts`, `unfilled` |
 | `build` | `side`, `steps` |
