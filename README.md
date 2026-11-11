@@ -49,7 +49,7 @@ Windows에서 [uv](https://docs.astral.sh/uv/)로 설치한다. Python(3.11 이�
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # dsdxlsx 설치 - 버전을 태그로 고정
-uv tool install git+https://github.com/procpalee/dsdxlsx@v0.5.0
+uv tool install git+https://github.com/procpalee/dsdxlsx@v0.5.1
 dsdxlsx --version
 ```
 
