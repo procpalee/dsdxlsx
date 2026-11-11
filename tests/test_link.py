@@ -294,3 +294,106 @@ def test_cli_make_reports_unlinked_account(tmp_path, capsys):
     code, out = _cli(capsys, "link", "make", skel, "--tb", tbp, "--json")
     env = json.loads(out)
     assert code == 1 and env["ok"] is True and sorted(env["unlinked_tb"]) == ["미수금", "미지급금"]
+
+
+# ── 서식, 머리말 이름표 ──────────────────────────────
+
+def _sides(cell):
+    b = cell.border
+    return tuple(s.style if s is not None else None for s in (b.left, b.right, b.top, b.bottom))
+
+
+def test_sheet_look_horizontal_rules_and_number_format(tmp_path):
+    _skel, out, _ = _made(tmp_path)
+    bs = openpyxl.load_workbook(out)["BS"]
+    last = bs.max_row
+    assert _sides(bs["B5"]) == (None, None, "medium", "thin") and bs["B5"].font.b          # 머리글: 위 굵게, 세로줄 없음
+    assert _sides(bs["C9"]) == (None, None, "thin", "thin")
+    assert _sides(bs.cell(last, 3)) == (None, None, "thin", "medium")                      # 마지막 줄 아래 굵게
+    assert bs["C9"].number_format == "#,###,##0;[Red](#,###,##0);-" and bs["C9"].alignment.horizontal == "right"
+    assert bs["B9"].alignment.horizontal == "left" and bs["G9"].number_format == "General"
+    assert [bs.cell(2, c).value for c in range(2, 8)] == ["회사명", "합성테스트(주)", "번호", None, "시트", "재무상태표"]
+    assert [bs.cell(3, c).value for c in (2, 3, 4, 5)] == ["기준일", "2026.12.31", "문서", "정산표"]
+    assert _sides(bs["B2"]) == (None, "thin", "medium", "thin") and _sides(bs["G3"]) == ("thin", None, "thin", "medium")
+    cf = openpyxl.load_workbook(out)["CF"]
+    assert cf["C9"].fill.fgColor.rgb.endswith("FFFBEF") and _sides(cf["C9"]) == (None, None, "thin", "thin")   # 입력칸도 줄은 그대로
+    note = openpyxl.load_workbook(out)["주석"]
+    assert note["B5"].fill.fgColor.rgb.endswith("393939") and note["B5"].font.color.rgb.endswith("FFFFFF")
+
+
+def test_header_labels_option(tmp_path, capsys):
+    skel = LF.write_skeleton(tmp_path / "skel.dsd")
+    tbp = LF.write_tb(tmp_path / "tb.json")
+    wp = str(tmp_path / "w.xlsx")
+    code, _ = _cli(capsys, "link", "make", skel, "--tb", tbp, "-o", wp, "--ref", "8110A", "--title", "정산표",
+                   "--labels", "회사명,조서번호,시트명,결산일,조서명,작성자")
+    ws = openpyxl.load_workbook(wp)["TB"]
+    assert code == 0 and [ws.cell(2, c).value for c in (4, 5, 6)] == ["조서번호", "8110A", "시트명"]
+    assert [ws.cell(3, c).value for c in (2, 4, 6)] == ["결산일", "조서명", "작성자"]
+    assert _cli(capsys, "link", "make", skel, "--tb", tbp, "-o", wp, "--force", "--labels", "회사명,번호")[0] == 2
+
+
+# ── 연결 기록이 없는 정산표(이전 방식으로 만든 것) ──
+
+def test_roundtrip_on_workbook_without_link_record(tmp_path, capsys):
+    skel, out, _ = _made(tmp_path)
+    wb = openpyxl.load_workbook(out)
+    pairs = core.read_link(wb)["note_pairs"]
+    del wb[core.LINK_SHEET]
+    wb.save(out)
+    code, text = _cli(capsys, "link", "test", skel, out, "--notes", "--json")
+    env = json.loads(text)
+    assert env["side"] == "별도" and env["diff"] == [] and env["blank"] == []
+    assert code == 1 and len(env["note_blank"]) == 3                                      # 주석 칸 짝을 몰라 비어 있음
+    assert any("주석 칸 짝" in w for w in env["warnings"])
+
+    pj = tmp_path / "dsd_link.json"
+    pj.write_text(json.dumps({"주석 당기-전기 칸": pairs}, ensure_ascii=False), encoding="utf-8")
+    code, text = _cli(capsys, "link", "test", skel, out, "--notes", "--pairs", str(pj), "--json")
+    env = json.loads(text)
+    assert (code, env["note_same"], env["note_blank"], env["warnings"]) == (0, 3, [], [])
+    pj.write_text('{"주석 당기-전기 칸": "C8"}', encoding="utf-8")
+    assert _cli(capsys, "link", "test", skel, out, "--pairs", str(pj))[0] == 2
+    assert _cli(capsys, "link", "test", skel, out, "--pairs", str(tmp_path / "none.json"))[0] == 2
+
+
+# ── 기준일 열이 여럿인 TB 표 ─────────────────────────
+
+def _tb_book(path, head, body):
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "TB"
+    for line in [head] + body:
+        ws.append(line)
+    wb.save(path)
+    return str(path)
+
+
+def test_tb_table_with_many_date_columns(tmp_path):
+    head = ["계정과목", "공시용계정과목", "회사제시", "수정사항", "2025.12.31", "2025.06.30", "2024.12.31"]
+    p = _tb_book(tmp_path / "pa.xlsx", head, [["현금", "현금및현금성자산", 150, 1, 100, 90, 80], ["보통예금", "현금및현금성자산", 400, 0, 200, 190, 180]])
+    rows, info = tbsrc.load(p)                                           # 지정이 없으면 가장 늦은 기준일의 앞 해 말
+    assert info["columns"] == {"cur": "회사제시", "pri": "2024.12.31"} and rows[0]["pri"] == 80
+    rows, info = tbsrc.load(p, pri_hint="2025.12.31")                    # 뼈대 DSD 의 전기말이 머리글에 있으면 그 열
+    assert info["columns"]["pri"] == "2025.12.31" and (info["cur"], info["pri"]) == ("2026.12.31", "2025.12.31")
+    assert [(r["code"], r["settle"], r["sub"], r["cur"], r["aje"], r["pri"]) for r in rows] == [
+        ("현금", "현금", "현금및현금성자산", 150, 1, 100), ("보통예금", "보통예금", "현금및현금성자산", 400, 0, 200)]
+    rows, info = tbsrc.load(p, cur_col="2025.12.31", pri_col="2025.06.30", pri_hint="2024.12.31")   # 직접 지정이 먼저
+    assert (rows[0]["cur"], rows[0]["pri"], info["cur"], info["pri"]) == (100, 90, "2025.12.31", "2025.06.30")
+    assert tbsrc.load(p, pri_hint="2030.12.31")[1]["columns"]["pri"] == "2024.12.31"   # 없는 머리글이면 원래 규칙
+    with pytest.raises(InputError, match="전기 열"):
+        tbsrc.load(p, pri_col="2019.12.31")
+    q = _tb_book(tmp_path / "dates.xlsx", ["계정과목", "2026.12.31", "2026.09.30", "2025.12.31"], [["현금", 150, 140, 100]])
+    assert tbsrc.load(q)[1]["columns"] == {"cur": "2026.12.31", "pri": "2025.12.31"}   # 당기가 기준일 열이면 1년 전 같은 날
+
+
+def test_cli_make_picks_prior_column_from_skeleton_period(tmp_path, capsys):
+    """TB 표에 기준일 열이 여럿이어도, 전기 금액이 뼈대와 맞는 열을 지정하면 짝이 맞는다."""
+    skel = LF.write_skeleton(tmp_path / "skel.dsd")
+    head = ["코드", "계정과목", "정산 과목", "회사제시", "수정사항", "2025.12.31", "2024.12.31"]
+    p = _tb_book(tmp_path / "tb.xlsx", head, [[c, n, s, cur, 0, pri, 1] for c, n, s, pri, cur in LF.TB])
+    code, out = _cli(capsys, "link", "make", skel, "--tb", p, "--tb-pri", "2025.12.31", "-o", str(tmp_path / "w.xlsx"), "--json")
+    env = json.loads(out)
+    assert (code, env["tb_columns"], env["to_check"]) == (0, {"cur": "회사제시", "pri": "2025.12.31"}, [])
+    code, out = _cli(capsys, "link", "make", skel, "--tb", p, "--tb-pri", "2024.12.31", "-o", str(tmp_path / "w2.xlsx"), "--json")
+    assert code == 1 and json.loads(out)["to_check"]                     # 전기 열을 잘못 고르면 연결점검에 드러난다

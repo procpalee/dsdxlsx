@@ -14,9 +14,11 @@ from ..theme import load_theme
 
 FIRST_COL = 2
 HDR_ROW = 5
-NUMFMT = '_-* #,##0_-;-* #,##0_-;_-* "-"_-;_-@_-'
+NUMFMT = "#,###,##0;[Red](#,###,##0);-"   # 음수는 빨간 괄호, 0 은 '-' (export · 대사 결과와 같은 서식)
 INPUT_RGB = "FFFBEF"                 # 사람이 넣는 칸(크림) - 왕복 시험이 이 색으로 입력칸을 찾는다
 TODO_RGB = "FFFF00"                  # 확인이 필요한 칸(노랑)
+SECTION_RGB = "393939"               # 구획 제목 줄(진회색 바탕에 흰 글씨)
+LABELS = ("회사명", "번호", "시트", "기준일", "문서", "작성자")   # 머리말 이름표 - meta["labels"] 로 바꿀 수 있다
 
 _NUM_RE = re.compile(r"(?m)^([ \t]*)(\d{1,2}\.(?!\d)|\(\d{1,2}\)|\d{1,2}\))[ \t]*(?=\S)")
 
@@ -29,54 +31,57 @@ def num_space(text):
 def _style():
     th = load_theme()
     c = th["colors"]
-    thin = Side(style="thin", color=c["border_in"])
-    return {"font": th["font"], "size": th["size_body"], "box": Border(left=thin, right=thin, top=thin, bottom=thin),
-            "head": PatternFill("solid", fgColor=c["header_fill"]), "head_text": c["header_text"]}
+    return {"font": th["font"], "size": th["size_body"], "thin": Side(style="thin", color=c["border_in"]),
+            "thick": Side(style="medium", color=c["border_out"]), "head": PatternFill("solid", fgColor=c["header_fill"]),
+            "head_text": c["header_text"]}
 
 
 def write_header(ws, meta: dict, title: str) -> int:
-    """시트 위 머리말(B2:G3) - 회사명 · 문서 번호 · 시트 / 기준일 · 문서 이름 · 작성자. 반환: 표 머리글 행."""
+    """시트 위 머리말(B2:G3) - 회사명 · 번호 · 시트 / 기준일 · 문서 · 작성자. 이름표는 meta["labels"](6개)로 바꾼다.
+    위아래는 굵은 줄, 가운데는 가는 줄, 양 끝 세로줄은 없다. 반환: 표 머리글 행."""
     st = _style()
     ws.column_dimensions["A"].width = 2.0
-    grid = [[("회사명", meta.get("company")), ("번호", meta.get("ref")), ("시트", title)],
-            [("기준일", meta.get("date")), ("문서", meta.get("title")), ("작성자", meta.get("author"))]]
-    for r, line in enumerate(grid, 2):
-        for i, (label, value) in enumerate(line):
-            lc = ws.cell(r, FIRST_COL + i * 2, label)
-            lc.font = Font(name=st["font"], size=st["size"], bold=True)
-            vc = ws.cell(r, FIRST_COL + i * 2 + 1, value if value not in (None, "") else None)
-            vc.font = Font(name=st["font"], size=st["size"])
-            for c in (lc, vc):
-                c.border = st["box"]
-                c.alignment = Alignment(horizontal="left", vertical="center")
+    labels = list(meta.get("labels") or LABELS)
+    values = [meta.get("company"), meta.get("ref"), title, meta.get("date"), meta.get("title"), meta.get("author")]
+    last = FIRST_COL + 5
+    for k in range(6):
+        r = 2 + k // 3
+        for j, (text, bold) in enumerate(((labels[k], True), (values[k], False))):
+            col = FIRST_COL + (k % 3) * 2 + j
+            c = ws.cell(r, col, text if text not in (None, "") else "")
+            c.font = Font(name=st["font"], size=st["size"], bold=bold, color="000000")
+            c.border = Border(left=None if col == FIRST_COL else st["thin"], right=None if col == last else st["thin"],
+                              top=st["thick"] if r == 2 else st["thin"], bottom=st["thick"] if r == 3 else st["thin"])
+            c.alignment = Alignment(horizontal="left", vertical="center")
     return HDR_ROW
 
 
 def write_table(ws, headers, rows, *, header_row: int = HDR_ROW, number_cols: dict | None = None) -> None:
-    """headers 와 rows(2차원)를 B열부터 쓴다. number_cols = {열 순번(0부터): 'accounting' 또는 서식 글}."""
+    """headers 와 rows(2차원)를 B열부터 쓴다. number_cols = {열 순번(0부터): 'accounting' 또는 서식 글}.
+    가로줄만 긋는다 - 머리글 위와 마지막 줄 아래는 굵게, 나머지는 가늘게."""
     st = _style()
     number_cols = number_cols or {}
     for i, h in enumerate(headers):
         c = ws.cell(header_row, FIRST_COL + i, h)
         c.font = Font(name=st["font"], size=st["size"], bold=True, color=st["head_text"])
         c.fill = st["head"]
-        c.border = st["box"]
+        c.border = Border(top=st["thick"], bottom=st["thin"])
         c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
     for j, row in enumerate(rows, 1):
+        bottom = st["thick"] if j == len(rows) else st["thin"]
         for i in range(len(headers)):
             v = row[i] if i < len(row) else None
             c = ws.cell(header_row + j, FIRST_COL + i, v)
-            c.font = Font(name=st["font"], size=st["size"])
-            c.border = st["box"]
+            c.font = Font(name=st["font"], size=st["size"], color="000000")
+            c.border = Border(top=st["thin"], bottom=bottom)
             fmt = number_cols.get(i)
             if fmt:
                 c.number_format = NUMFMT if fmt == "accounting" else fmt
-            if fmt and fmt != "@" and not isinstance(v, str):
-                c.alignment = Alignment(horizontal="right", vertical="center")
-            elif isinstance(v, str) and v.startswith("=") and fmt:
-                c.alignment = Alignment(horizontal="right", vertical="center")
-            else:
-                c.alignment = Alignment(horizontal="left", vertical="center")
+            # 정렬은 값으로 정한다 - 숫자는 오른쪽, 글자는 왼쪽. 빈 칸과 수식은 숫자 열이면 오른쪽
+            number = isinstance(v, (int, float)) and not isinstance(v, bool)
+            text = isinstance(v, str) and not v.startswith("=")
+            right = number or (not text and bool(fmt) and fmt != "@")
+            c.alignment = Alignment(horizontal="right" if right else "left", vertical="center")
 
 
 def write_section_bar(ws, row: int, text: str, *, first_col: int = FIRST_COL, last_col: int = 9) -> int:
@@ -84,8 +89,8 @@ def write_section_bar(ws, row: int, text: str, *, first_col: int = FIRST_COL, la
     st = _style()
     for col in range(first_col, last_col + 1):
         c = ws.cell(row, col)
-        c.fill = st["head"]
-        c.font = Font(name=st["font"], size=st["size"], bold=True, color=st["head_text"])
+        c.fill = PatternFill("solid", fgColor=SECTION_RGB)
+        c.font = Font(name=st["font"], size=st["size"], bold=True, color="FFFFFF")
         c.alignment = Alignment(horizontal="left", vertical="center")
     ws.cell(row, first_col, text)
     return row + 2
@@ -93,6 +98,7 @@ def write_section_bar(ws, row: int, text: str, *, first_col: int = FIRST_COL, la
 
 def _fill(ws, rgb: str, refs) -> None:
     fill = PatternFill("solid", fgColor=rgb)
+    st = _style()
     for ref in refs:
         cells = ws[ref]
         if not isinstance(cells, tuple):
@@ -100,6 +106,8 @@ def _fill(ws, rgb: str, refs) -> None:
         for line in cells:
             for c in (line if isinstance(line, tuple) else (line,)):
                 c.fill = fill
+                if c.value is None:                      # 빈 입력칸의 글자색은 자동(값을 넣으면 엑셀 기본색)
+                    c.font = Font(name=st["font"], size=st["size"])
 
 
 def mark_cells(ws, *, input=(), todo=()) -> None:

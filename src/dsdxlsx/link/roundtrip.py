@@ -18,14 +18,23 @@ from .core import HDR_ROW, key_of, main_table, read_link, row_vals, squeeze, tid
 from .sheetkit import is_input
 
 
-def set_prior_as_current(path: str, notes: bool) -> None:
-    """사본의 당기 입력에 전기 금액을 넣는다 - TB 당기 = 전기, 입력칸(크림) = 옆 전기 칸, 자본변동표 = 전기 줄."""
+def note_pairs(wb, pairs=None) -> list:
+    """주석 시트의 (당기 칸, 전기 칸) 짝 - 따로 준 것이 있으면 그것, 없으면 정산표의 연결 기록."""
+    if pairs is not None:
+        return [list(x) for x in pairs]
+    return (read_link(wb) or {}).get("note_pairs") or []
+
+
+def set_prior_as_current(path: str, notes: bool, pairs=None) -> int:
+    """사본의 당기 입력에 전기 금액을 넣는다 - TB 당기 = 전기, 입력칸(크림) = 옆 전기 칸, 자본변동표 = 전기 줄.
+    반환: 주석에서 전기 금액을 넣은 칸 수."""
     wb = load_workbook(path)
-    link = read_link(wb) or {}
+    n_notes = 0
     if notes and "주석" in wb.sheetnames:
         ws = wb["주석"]
-        for cell, prior in link.get("note_pairs") or []:
+        for cell, prior in note_pairs(wb, pairs):
             ws[cell].value = ws[prior].value
+            n_notes += 1
     ws = wb["TB"]
     for r in range(HDR_ROW + 1, ws.max_row + 1):
         if ws.cell(r, 2).value is None:
@@ -52,6 +61,7 @@ def set_prior_as_current(path: str, notes: bool) -> None:
                     if twin:
                         s.cell(r, c).value = s.cell(twin, c).value
     wb.save(path)
+    return n_notes
 
 
 def compare(built: dict, skeleton: dict) -> dict:
@@ -127,8 +137,9 @@ def compare(built: dict, skeleton: dict) -> dict:
 
 
 def run(skeleton: str, workbook: str, *, conf: dict | None = None, recipe: dict | None = None, notes: bool = False,
-        workdir: str | None = None) -> dict:
-    """왕복 시험을 돌리고 결과를 돌려준다. conf = recon 설정의 한쪽('별도'나 '연결')."""
+        workdir: str | None = None, pairs=None) -> dict:
+    """왕복 시험을 돌리고 결과를 돌려준다. conf = recon 설정의 한쪽('별도'나 '연결').
+    pairs = 주석의 (당기 칸, 전기 칸) 짝 - 연결 기록이 없는 정산표(이전 방식으로 만든 것)에 따로 줄 때."""
     from .. import build as B
     from .. import docview
     from .. import recon as R
@@ -146,7 +157,7 @@ def run(skeleton: str, workbook: str, *, conf: dict | None = None, recipe: dict 
     try:
         wp = os.path.join(td, "시험_정산표.xlsx")
         shutil.copy(workbook, wp)
-        set_prior_as_current(wp, notes)
+        n_notes = set_prior_as_current(wp, notes, pairs)
         calc.freeze(wp)
         conf = conf or recon_config()
         sheets = R.load_workpaper(wp, None, conf.get("주석"), skip=conf.get("빼는 시트"), fs_map=conf.get("재무제표") or None)
@@ -161,6 +172,8 @@ def run(skeleton: str, workbook: str, *, conf: dict | None = None, recipe: dict 
         res["warnings"] = list(rep.warnings)
         if not notes:
             res["note_same"], res["note_diff"], res["note_blank"] = 0, [], []
+        elif not n_notes:
+            res["warnings"].append("정산표에 주석 칸 짝 기록이 없어 주석의 당기 칸을 채우지 못했습니다 - 주석 결과는 참고만")
         return res
     finally:
         if tmp is not None:

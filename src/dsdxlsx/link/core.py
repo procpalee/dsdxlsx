@@ -921,7 +921,7 @@ def recon_config() -> dict:
 
 
 def make(doc: dict, tb: list, info: dict, *, company: str = "", title: str | None = None, ref: str = "",
-         author: str | None = None, consolidated: bool = False, source: str = "", sha256: str = ""):
+         author: str | None = None, labels=None, consolidated: bool = False, source: str = "", sha256: str = ""):
     """뼈대 DSD(inspect 사전)와 TB 로 정산표 통합문서를 만든다. 반환: (Workbook, 요약 사전)."""
     sec = {s["section"]: s for s in doc["sections"]}
     bs_s = sec.get("재무상태표")
@@ -936,7 +936,7 @@ def make(doc: dict, tb: list, info: dict, *, company: str = "", title: str | Non
     is_, ic, ip = lines_of(is_t)
     is_ = build_is(is_, m, bs)
     meta = {"company": company, "ref": ref, "date": info["cur"], "title": title or ("연결정산표" if consolidated else "정산표"),
-            "author": author}
+            "author": author, "labels": labels}
     wb = Workbook()
     wb.remove(wb.active)
     tb_sheet(wb, meta, tb, m, info)

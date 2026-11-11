@@ -3,6 +3,9 @@
 세 가지 모양을 받는다.
   1) JSON(dsdxlsx.tb/1): {"period": {"cur", "pri"}, "rows": [{"code", "name", "settle", "cur", "aje", "pri"}]}
   2) 표(엑셀 시트나 CSV): 머리글 '계정과목'이 있는 줄부터. 열은 이름으로 찾는다.
+     당기 = '회사제시'나 '당기' 열(없으면 가장 늦은 기준일 열), 전기 = '전기' 열(없으면 기준일 열에서 고른다 - 아래 _pick_prior).
+     기준일 열이 여럿인 표는 cur_col · pri_col 로 머리글을 직접 지정할 수 있다.
+     pri_hint(뼈대 DSD 의 전기말 날짜 글)를 주면 그 머리글이 있을 때 그 열을 전기로 쓴다.
   3) 계정 체계 폴더: levels.csv · coa.csv · tb.csv · aje.csv · tb.json
 
 돌려주는 값: (rows, info)
@@ -82,7 +85,24 @@ def _table_rows(lines: list[list]):
     raise InputError("TB 표에서 머리글 '계정과목'을 찾지 못했습니다")
 
 
-def _from_table(lines: list[list]):
+def _ymd(h: str) -> tuple:
+    return tuple(int(x) for x in _DATE_RE.match(h).groups())
+
+
+def _pick_prior(dates: list, cur_is_date: bool):
+    """기준일 머리글(오름차순)에서 전기 열. 당기가 기준일 열이면 그 1년 전 같은 날, 없으면 그 앞 열.
+    당기가 '회사제시'처럼 날짜가 아닌 열이면 가장 늦은 기준일의 앞 해에서 가장 늦은 날(직전 연도 말)."""
+    if not dates:
+        return None
+    y, m, d = _ymd(dates[-1])
+    if cur_is_date:
+        same = [h for h in dates[:-1] if _ymd(h) == (y - 1, m, d)]
+        return same[0] if same else (dates[-2] if len(dates) >= 2 else None)
+    before = [h for h in dates if _ymd(h)[0] < y]
+    return before[-1] if before else dates[-1]
+
+
+def _from_table(lines: list[list], cur_col: str | None = None, pri_col: str | None = None, pri_hint: str | None = None):
     hdr, body = _table_rows(lines)
 
     def col(*names):
@@ -95,15 +115,29 @@ def _from_table(lines: list[list]):
     dates = sorted((h for h in hdr if _DATE_RE.match(h)), key=lambda h: tuple(int(x) for x in _DATE_RE.match(h).groups()))
     c_name, c_code = hdr["계정과목"], col("코드", "계정코드")
     c_settle, c_sub, c_group = col("정산과목", "정산"), col("공시용계정과목", "공시과목", "공시"), col("구분", "대분류")
-    c_cur, c_aje, c_pri = col("회사제시", "당기"), col("수정사항", "수정", "AJE"), col("전기")
+    def named(want, what):
+        k = re.sub(r"\s", "", str(want))
+        hit = hdr.get(k)
+        if hit is None:
+            hit = next((j for h, j in hdr.items() if h.startswith(k)), None)
+        if hit is None:
+            raise InputError("TB 표에 %s 열 '%s' 이 없습니다(머리글: %s)" % (what, want, ", ".join(list(hdr)[:14])))
+        return hit
+
+    c_aje = col("수정사항", "수정", "AJE")
+    c_cur = named(cur_col, "당기") if cur_col else col("회사제시", "당기")
+    cur_is_date = False
     if c_cur is None and dates:
-        c_cur = hdr[dates[-1]]
-    if c_pri is None and len(dates) >= 2:
-        c_pri = hdr[dates[-2]]
-    elif c_pri is None and len(dates) == 1 and c_cur != hdr[dates[0]]:
-        c_pri = hdr[dates[0]]
+        c_cur, cur_is_date = hdr[dates[-1]], True
+    c_pri = named(pri_col, "전기") if pri_col else col("전기")
+    if c_pri is None and pri_hint and hdr.get(re.sub(r"\s", "", pri_hint)) not in (None, c_cur):
+        c_pri = hdr[re.sub(r"\s", "", pri_hint)]
+    if c_pri is None:
+        pick = _pick_prior(dates, cur_is_date)
+        c_pri = hdr[pick] if pick is not None and hdr[pick] != c_cur else None
     if c_pri is None:
         raise InputError("TB 표에 전기 금액 열이 없습니다(머리글 '전기' 또는 전기 기준일)")
+    name_of = {j: h for h, j in hdr.items()}
     get = lambda r, j: r[j] if j is not None and j < len(r) else None  # noqa: E731
     rows = []
     for r in body:
@@ -115,12 +149,20 @@ def _from_table(lines: list[list]):
                          cur=get(r, c_cur), aje=get(r, c_aje), pri=get(r, c_pri)))
     if not rows:
         raise InputError("TB 표에 계정 줄이 없습니다")
-    cur_label = dates[-1] if len(dates) >= 2 else "당기"
-    pri_label = dates[-2] if len(dates) >= 2 else (dates[0] if len(dates) == 1 else "전기")
-    return rows, {"cur": cur_label, "pri": pri_label, "plan": "", "form": ""}
+    pri_h, cur_h = name_of[c_pri], name_of.get(c_cur, "")
+    pri_label = pri_h if _DATE_RE.match(pri_h) else "전기"
+    if _DATE_RE.match(cur_h):
+        cur_label = cur_h
+    elif _DATE_RE.match(pri_h):                     # 당기가 '회사제시' 열이면 전기 기준일의 1년 뒤
+        y, m, d = _ymd(pri_h)
+        cur_label = "%04d.%02d.%02d" % (y + 1, m, d)
+    else:
+        cur_label = "당기"
+    return rows, {"cur": cur_label, "pri": pri_label, "plan": "", "form": "", "columns": {"cur": cur_h, "pri": pri_h}}
 
 
-def load_xlsx(path: str, sheet: str | None = None):
+def load_xlsx(path: str, sheet: str | None = None, cur_col: str | None = None, pri_col: str | None = None,
+              pri_hint: str | None = None):
     from openpyxl import load_workbook
     wb = load_workbook(path, data_only=True, read_only=True)
     try:
@@ -130,12 +172,12 @@ def load_xlsx(path: str, sheet: str | None = None):
         lines = [list(r) for r in ws.iter_rows(values_only=True)]
     finally:
         wb.close()
-    return _from_table(lines)
+    return _from_table(lines, cur_col, pri_col, pri_hint)
 
 
-def load_csv(path: str):
+def load_csv(path: str, cur_col: str | None = None, pri_col: str | None = None, pri_hint: str | None = None):
     with open(path, encoding="utf-8-sig", newline="") as f:
-        return _from_table([list(r) for r in csv.reader(f)])
+        return _from_table([list(r) for r in csv.reader(f)], cur_col, pri_col, pri_hint)
 
 
 # ── 3) 계정 체계 폴더 ────────────────────────────────
@@ -190,7 +232,10 @@ def load_folder(d: str):
 
 # ── 고르기 ───────────────────────────────────────────
 
-def load(path: str, sheet: str | None = None):
+def load(path: str, sheet: str | None = None, cur_col: str | None = None, pri_col: str | None = None,
+         pri_hint: str | None = None):
+    """cur_col · pri_col = 표(엑셀 · CSV)에서 당기 · 전기 금액 열의 머리글(기준일 열이 여럿일 때).
+    pri_hint = 전기말 날짜 글(2025.12.31) - 지정이 없고 그 머리글이 있으면 그 열."""
     if not os.path.exists(path):
         raise InputError("TB 를 찾을 수 없습니다: %s" % path)
     if os.path.isdir(path):
@@ -202,22 +247,23 @@ def load(path: str, sheet: str | None = None):
     if ext == ".json":
         return load_json(path)
     if ext == ".csv":
-        return load_csv(path)
+        return load_csv(path, cur_col, pri_col, pri_hint)
     if ext in (".xlsx", ".xlsm"):
-        return load_xlsx(path, sheet)
+        return load_xlsx(path, sheet, cur_col, pri_col, pri_hint)
     raise InputError("TB 는 JSON · CSV · 엑셀(.xlsx) 파일이나 계정 체계 폴더여야 합니다: %s" % path)
 
 
-def load_consolidated(parent: str, subs: list[str], adj_json: str, sheet: str | None = None):
+def load_consolidated(parent: str, subs: list[str], adj_json: str, sheet: str | None = None, cur_col: str | None = None,
+                      pri_col: str | None = None, pri_hint: str | None = None):
     """연결 정산표용 TB: 지배기업(코드 앞 P.) + 종속기업(S1. S2. …) 계정 줄 + 전기 연결조정 줄(ADJ.).
 
     adj_json = [{"name": 계정과목, "sub": 공시용 과목, "settle": 정산 과목(선택), "pri": 전기 연결조정 금액}]
     또는 {"adj": [...], "map": {"S1.457": "정산 과목"}} - map 은 계정 줄의 정산 과목을 바꾼다.
     """
-    a, info = load(parent, sheet)
+    a, info = load(parent, sheet, cur_col, pri_col, pri_hint)
     rows = [dict(r, code="P." + r["code"]) for r in a]
     for i, s in enumerate(subs, 1):
-        b, _ = load(s, sheet)
+        b, _ = load(s, sheet, cur_col, pri_col, pri_hint)
         rows += [dict(r, code="S%d.%s" % (i, r["code"])) for r in b]
     adj_list, settle_map = [], {}
     if adj_json:
