@@ -192,6 +192,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `link make` | `side`, `sheets`, `accounts`, `note_tables`, `to_check`(sheet·label·issue·prior), `unlinked_tb`(DSD 행에 짝이 없는 TB 과목), TB가 표일 때 `tb_columns`(읽은 당기·전기 열의 머리글). `to_check`가 있으면 종료코드 1 |
 | `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1 |
 | `link refresh` | `accounts`, `added`(새로 붙인 계정 코드). 새 계정이 있으면 종료코드 1 |
+| `link back` | `changes`(아래), `counts`(종류별 수), `unchanged`, `applied`(정산표에 쓴 칸 수), `backup`(쓰기 전 사본), `unmapped`(출처 기록에 없는 칸의 변경: cell·label·old·new), `map`. 사람이 볼 것이 남으면 종료코드 1 |
 | `rollforward`, `roll-interim` | `counts`(자동확정·확인필요·미처리), `painted`, `todo`. `roll-interim`은 `period`, `dart`도 |
 | `renumber` | `notes`, `mapping`, `mentions`, `headings`, `ref_cells` |
 | `refoot` | `applied`, `items`, `skipped` |
@@ -302,8 +303,40 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `value` | 채울 때 쓴 값. `sign × (sources 칸의 합) × scale`을 DSD 자릿수로 반올림한 것이다 |
 | `sources` | 값을 가져온 정산표 칸. 여러 개면 그 합(하위 계정 합). 비어 있으면 정산표 칸 없이 계산한 값(위 칸의 합)이다 |
 | `scale`, `sign` | 정산표 값에 곱한 배율(원과 천원, 율은 100)과 부호(차감 계정을 양수로 적는 정산표는 -1) |
+| `row_label` | 최종 DSD에서 그 칸이 놓인 행의 이름. 나중에 칸 번호가 밀렸는지 볼 때 맞춰 본다 |
 | `state` | `overridden`이면 채운 뒤 레시피나 글 바꾸기가 그 칸을 다시 고쳤다(`final`이 최종 값). `missing`이면 최종 DSD에 그 칸이 없다. 없으면 기록대로다 |
 | `dsd`, `skeleton`, `workbook`, `recipe` | 만든 때의 파일 이름과 sha256. 그 뒤 파일이 바뀌었는지 볼 때 쓴다 |
+
+### link back 의 반영 목록
+
+`changes`의 항목은 DSD에서 바뀐 칸 하나다.
+
+| 필드 | 뜻 |
+|---|---|
+| `cell`, `section`, `label`, `col` | DSD 칸 |
+| `old`, `new` | 채울 때 쓴 값과 지금 DSD의 값 |
+| `kind` | 아래 표 |
+| `sheet`, `ref` | 출처인 정산표 칸(없으면 `null`) |
+| `proposed` | 정산표 칸에 넣을 값(단위와 부호를 되돌린 것). 수식 칸은 `null` |
+| `applied` | `--apply`로 정산표에 썼으면 `true` |
+| `tb_delta`, `accounts` | `kind`가 `tb`일 때: TB 금액(차변 +)을 얼마 바꾸면 되는지와 그 행에 걸린 TB 계정들 |
+| `also` | 같은 정산표 칸에서 오는 다른 DSD 칸의 수(다시 build하면 같이 바뀐다) |
+| `note` | 사람용 설명 |
+
+| `kind` | 뜻 | `--apply` |
+|---|---|---|
+| `value` | 출처가 값 칸이다 | 쓴다 |
+| `done` | 정산표에 이미 그 값이 있다 | - |
+| `scaled` | 값 칸이지만 단위가 달라(원과 천원, 율) 정확한 값을 모른다 | 제안 값만 |
+| `conflict` | 정산표의 그 칸도 바뀌었거나, 같은 정산표 칸에서 오는 DSD 칸들을 서로 다른 값으로 고쳤다 | 안 쓴다 |
+| `tb` | TB를 끌어오는 수식이다(`link make` 정산표) | 안 쓴다 |
+| `formula` | 합계나 다른 칸을 참조하는 수식이다 | 안 쓴다 |
+| `sum` | 정산표 여러 칸의 합이다 | 안 쓴다 |
+| `tie` | 정산표에 값이 같은 칸이 둘 이상이라 그중 하나를 골랐던 칸이다 | 안 쓴다 |
+| `calc` | 정산표 칸 없이 계산한 값이다(위 칸의 합) | 안 쓴다 |
+| `recipe` | 레시피가 넣은 칸이다 | 안 쓴다 |
+| `blank` | 고친 칸이 비었거나 숫자가 아니다 | 안 쓴다 |
+| `moved` | 칸 번호가 밀렸다(DSD에서 행이나 표를 넣고 뺌). 하나라도 있으면 아무것도 쓰지 않는다 | 안 쓴다 |
 
 ### link 의 TB (`dsdxlsx.tb/1`)
 

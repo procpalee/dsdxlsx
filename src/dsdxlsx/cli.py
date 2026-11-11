@@ -1381,6 +1381,54 @@ def cmd_link_test(args) -> int:
     return 1 if bad else 0
 
 
+def cmd_link_back(args) -> int:
+    """DSD 에서 고친 숫자를 정산표로 - 칸별 출처 기록으로 정산표 칸을 찾아 반영 목록을 내고, --apply 면 값 칸에 쓴다."""
+    from . import build as B
+    from . import srcmap
+    from .link import back
+
+    src = args.map or args.dsd
+    m = srcmap.load(src)
+    if m is None:
+        raise guard.InputError("칸별 출처 기록을 찾을 수 없습니다: %s - 이 DSD 를 만든 build · fill 의 출력 DSD 나 map.json 을 --map 으로 주세요"
+                               % (src if src.lower().endswith(".json") else srcmap.path_of(src)))
+    res = back.plan(args.dsd, args.workbook, m)
+    changes, counts = res["changes"], res["counts"]
+    built = args.map if args.map and not args.map.lower().endswith(".json") else args.dsd
+    extra = [] if counts.get("moved") else back.unmapped(args.dsd, B.last_build_path(built), m)
+    applied, backup = 0, None
+    if args.apply and not counts.get("moved"):
+        was_ours = guard.untouched(args.workbook)
+        applied, backup = back.apply(args.workbook, changes)
+        if applied and was_ours:
+            guard.remember(args.workbook)
+    todo = [x for x in changes if x["kind"] != "done" and not x.get("applied")]
+    _note(args, outputs=[args.workbook] if applied else [], warnings=res["warnings"], changes=changes, counts=counts,
+          unchanged=res["unchanged"], applied=applied, backup=backup, unmapped=extra[:200], map=srcmap.path_of(src)
+          if not src.lower().endswith(".json") else src)
+    print(f"DSD 에서 바뀐 칸 {len(changes)}개 (그대로인 칸 {res['unchanged']}개)")
+    for w in res["warnings"]:
+        print(f"  [주의] {w}")
+    fmt = lambda v: "(빈칸)" if v in (None, "") else format(v, ",") if isinstance(v, (int, float)) else str(v)   # noqa: E731
+    for x in changes[:60]:
+        where = f" → {x['sheet']}!{x['ref']}" if x.get("ref") else ""
+        prop = f" = {fmt(x['proposed'])}" if x.get("proposed") is not None else ""
+        mark = "썼음" if x.get("applied") else x["kind"]
+        print(f"  [{mark}] {x['section']} · {x['label'][:24]} × {x['col'][:14]}: {fmt(x['old'])} → {fmt(x['new'])}{where}{prop} - {x['note']}")
+    if len(changes) > 60:
+        print(f"  ... 외 {len(changes) - 60}개(--json 으로 전부)")
+    if extra:
+        print(f"출처 기록에 없는 칸의 변경 {len(extra)}개(전기 칸 · 못 채운 칸 · 글 - 정산표에 짝이 없음)")
+        for x in extra[:15]:
+            print(f"  {x['cell']} {x['label'][:24]}: {x['old'][:20]} → {x['new'][:20]}")
+    if applied:
+        print(f"정산표에 {applied}칸을 썼습니다: {args.workbook}\n  쓰기 전 사본: {backup}")
+        print("  엑셀에서 열어 저장하면 수식 값이 다시 계산됩니다. 그 뒤 build --force 로 DSD 를 다시 만들어 맞는지 확인하세요.")
+    elif any(x["kind"] == "value" for x in changes):
+        print("값 칸은 --apply 를 주면 정산표에 씁니다(쓰기 전에 사본을 둡니다).")
+    return 1 if (todo or extra) else 0
+
+
 def cmd_fill(args) -> int:
     from . import fill as F
     from . import splice
@@ -1499,7 +1547,7 @@ HELP_GROUPS = """\
                 recheck  calibrate  ties
   다음 기간     rollforward(연차)  roll-interim(분·반기)  renumber(주석 번호)
   조서와 맞추기 recon(대사)  fill(당기 칸 채움)  build(정산표로 다시 만들기)  disc(8400 점검표)
-                tb(더존 · 세무사랑 자료 → TB)  link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험)
+                tb(더존 · 세무사랑 자료 → TB)  link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험 · DSD 에서 고친 값 되돌리기)
   두 판 비교    diff(HTML 보고서)  verify(구조 비교)
   엑셀 없이     inspect(읽기·목차·찾기)  apply(JSON 편집)  annotate-ai(AI 검토 기록)
 
@@ -1887,7 +1935,7 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_tb)
 
-    p = sub.add_parser("link", help="정산표와 DSD 연결 - 뼈대 DSD 행 그대로 정산표 만들기 · TB 금액 다시 넣기 · 왕복 시험")
+    p = sub.add_parser("link", help="정산표와 DSD 연결 - 뼈대 DSD 행 그대로 정산표 만들기 · TB 금액 다시 넣기 · 왕복 시험 · 되돌리기")
     lsub = p.add_subparsers(dest="tcmd", required=True)
     json_help = "결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)"
 
@@ -1928,6 +1976,14 @@ def main(argv=None) -> int:
     pt.add_argument("--workdir", help="시험 사본과 결과 DSD 를 남길 폴더(기본: 임시 폴더)")
     pt.add_argument("--json", action="store_true", help=json_help)
     pt.set_defaults(func=cmd_link_test)
+
+    pb = lsub.add_parser("back", help="DSD 에서 고친 숫자를 정산표로 - 반영 목록을 내고 --apply 면 값 칸에 쓴다")
+    pb.add_argument("dsd", help="고친 .dsd (build · fill 의 출력 DSD 를 직접 고친 것, 또는 그 사본)")
+    pb.add_argument("workbook", help="정산표 .xlsx")
+    pb.add_argument("--map", help="칸별 출처 기록 - map.json 이나 그 기록을 남긴 출력 DSD (기본: 고친 DSD 옆 _build 폴더)")
+    pb.add_argument("--apply", action="store_true", help="값 칸의 제안 값을 정산표에 쓴다(쓰기 전에 정산표 옆 _build 폴더에 사본)")
+    pb.add_argument("--json", action="store_true", help=json_help)
+    pb.set_defaults(func=cmd_link_back)
 
     args = ap.parse_args(_fix_json_flag(list(sys.argv[1:] if argv is None else argv)))
     return _run(args)

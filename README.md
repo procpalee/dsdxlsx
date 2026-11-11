@@ -182,6 +182,7 @@ uv run --no-editable dsdxlsx tb 자료폴더 [--key 2025 | --key 202509 --date 2
 uv run --no-editable dsdxlsx link make 뼈대.dsd --tb tb.json [--company 회사명] [--config 설정.json] [-o 정산표.xlsx]
 uv run --no-editable dsdxlsx link test 뼈대.dsd 뼈대_정산표.xlsx [--config 설정.json] [--notes]
 uv run --no-editable dsdxlsx link refresh 뼈대_정산표.xlsx --tb tb.json
+uv run --no-editable dsdxlsx link back 보고서.dsd 정산표.xlsx [--apply] [--map 기록]
 #    make: 시트 TB(계정 → 'DSD 행') · BS · IS · SCE · CF · 주석 · 연결점검. 재무제표 시트의 행은 뼈대 DSD 행 순서 그대로이고
 #      당기 칸은 TB 를 SUMIF 로 끌어온다. 합계 줄은 전기 금액으로 구성이 확인된 것만 수식, 아니면 입력칸(크림).
 #      짝짓기: 정산 과목 이름 = DSD 행 이름 → 전기 금액 → 남은 과목 묶음(최대 4개). 못 맞춘 것은 '연결점검' 시트와 종료코드 1.
@@ -197,6 +198,14 @@ uv run --no-editable dsdxlsx link refresh 뼈대_정산표.xlsx --tb tb.json
 #      원본 정산표와 뼈대는 건드리지 않는다. 주석 칸의 짝은 정산표의 숨은 시트에서 읽고, 없는 정산표는 --pairs 짝.json 으로 준다.
 #    refresh: TB 시트의 금액만 다시 넣는다. 사람이 고친 'DSD 행'은 그대로, 새 계정은 맨 아래(노란 칸).
 #    그 뒤: 정산표를 엑셀에서 열어 저장(수식 값 계산) → dsdxlsx build 뼈대.dsd 정산표.xlsx [--config 설정.json]
+#    back: build · fill 로 만든 DSD 를 직접 고쳤을 때(DART 편집기, 풋팅 워크북 반영) 그 숫자를 정산표로 되돌린다.
+#      칸별 출처 기록(_build/<이름>.map.json)으로 바뀐 DSD 칸마다 정산표의 시트와 칸을 찾아 반영 목록을 낸다.
+#      --apply 는 출처가 값 칸인 것만 정산표에 쓴다(쓰기 전에 정산표 옆 _build 폴더에 사본). 단위와 부호는 기록대로 되돌린다.
+#      쓰지 않고 알리기만 하는 것: TB 를 끌어오는 수식(TB 수정사항에 차변 · 대변 얼마인지 제안), 합계 수식, 여러 칸의 합,
+#      단위가 다른 칸(원 · 천원 - 제안 값만), 정산표도 바뀐 칸, 레시피가 넣은 칸, 값이 같은 칸 중 하나를 골랐던 칸.
+#      DSD 에서 행 · 표를 넣고 빼서 칸 번호가 밀렸으면 아무것도 쓰지 않는다(뼈대에 옮기고 다시 build).
+#      고친 DSD 가 사본이면 --map 으로 기록을 남긴 출력 DSD 나 map.json 을 준다.
+#      쓴 뒤에는 정산표를 엑셀에서 열어 저장하고 build --force 로 DSD 를 다시 만들어 고친 값과 같은지 본다.
 
 # 1-1c) DSD ↔ 조서 대사: 재무제표·주석 칸마다 조서(최종분석적검토·PA 정산표·연결정산표)에서 같은 값 찾기
 uv run --no-editable dsdxlsx recon 보고서.dsd 8110_최종분석적검토.xlsx     # → 보고서_조서대사.xlsx

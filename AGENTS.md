@@ -55,6 +55,7 @@ dsdxlsx diff 보고서.dsd 보고서_수정.dsd                # 7. 사람에게
 | DSD 숫자 ↔ 조서 대사, 당기 칸 채움 | `recon`, `fill`, `build` |
 | 더존·세무사랑 자료 → TB | `tb <자료 폴더>` → `TB_<꼬리>.json` (`warnings`, `no_code` 확인) |
 | 뼈대 DSD 행 그대로 정산표 만들기, 연결 확인 | `link make` → `link test`(왕복 시험), TB 가 바뀌면 `link refresh` |
+| DSD 에서 고친 숫자를 정산표로 | `link back <고친 DSD> <정산표> --json` 으로 목록을 보고, 값 칸만 `--apply` |
 | DART 공시 → DSD | `dart` (OpenDART 키 필요) |
 | 주석 번호 정리 | `renumber` |
 | 사람이 엑셀로 고칠 때 | `export` → (엑셀 편집) → `import`. 풋팅 워크북(`foot`)에서 고친 칸 값도 `import`로 되돌린다 |

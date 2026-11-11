@@ -62,6 +62,7 @@ dsdxlsx check <DSD> --json
 - 분·반기: `dsdxlsx roll-interim <직전 중간보고서 DSD> --prior-same <전년 동기 DSD> --json`.
 - `todo`(확인필요·미처리)를 사용자에게 그대로 전한다.
 - TB: 더존·세무사랑 자료 폴더가 있으면 `dsdxlsx tb <자료 폴더> --json` → `TB_<꼬리>.json`. `warnings`와 `no_code`를 사용자에게 전한다. 종료코드 2면 모자란 파일이나 부호합 불일치이니 메시지를 그대로 전하고 멈춘다.
+- DSD 에서 고친 숫자를 정산표로: `dsdxlsx link back <고친 DSD> <정산표> --json` 으로 `changes` 를 사용자에게 보여 주고, 사용자가 좋다고 하면 `--apply`(값 칸만 쓰고 사본을 남긴다). `tb` · `formula` · `conflict` 같은 나머지 종류는 `note` 를 그대로 전한다.
 - 정산표: `dsdxlsx link make <뼈대 DSD> --tb <TB> --json` → `<뼈대>_정산표.xlsx`. `to_check`와 `unlinked_tb`를 사용자에게 전하고, `dsdxlsx link test <뼈대 DSD> <정산표> --notes --json`의 `diff`·`blank`가 비었는지 확인한다. TB 형식은 `docs/JSON형식.md`의 `dsdxlsx.tb/1`.
 
 ### E. DART에서 받기

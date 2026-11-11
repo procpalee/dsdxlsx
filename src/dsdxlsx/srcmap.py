@@ -9,7 +9,7 @@ fill 과 build 는 DSD 당기 칸을 정산표에서 채운다. 그때 어느 �
 기록 형식(dsdxlsx.map/1)
   dsd · skeleton · workbook · recipe   파일 이름과 sha256(만든 때의 내용 - 그 뒤 바뀌었는지 볼 때)
   cells[]   cell(DSD 칸 ID) · section · table · row · label · col · value(쓴 값) · sources[{sheet, cell}] · scale · sign · how
-            sources 가 비면 정산표 칸 없이 계산한 값(위 칸의 합).
+            sources 가 비면 정산표 칸 없이 계산한 값(위 칸의 합). row_label 은 최종 DSD 에서 그 칸이 놓인 행의 이름.
             state = "overridden" 이면 채운 뒤 레시피나 글 바꾸기가 그 칸을 다시 고쳤다(final = 최종 값) - 출처가 이 기록과 다르다.
             state = "missing" 이면 최종 DSD 에 그 칸이 없다(레시피가 행 · 표를 바꿈).
   counts    cells · overridden · missing · unfilled
@@ -45,8 +45,8 @@ def _same(a, b) -> bool:
     return abs(float(a) - float(b)) < 0.005
 
 
-def final_values(dsd: str) -> dict:
-    """DSD 의 칸 ID → 숫자 값(숫자가 아닌 칸은 None)."""
+def dsd_cells(dsd: str) -> dict:
+    """DSD 의 칸 ID → {"value": 숫자 | None, "text": 칸 글, "row_label": 그 행의 이름}."""
     from . import docview
     from .dsd_io import read_dsd
     from .parse import parse_contents
@@ -59,13 +59,19 @@ def final_values(dsd: str) -> dict:
                 continue
             for r in b["rows"]:
                 for c in r["cells"]:
-                    out[c["id"]] = c.get("value")
+                    out[c["id"]] = {"value": c.get("value"), "text": c.get("text") or "", "row_label": r.get("label") or ""}
     return out
+
+
+def final_values(dsd: str) -> dict:
+    """DSD 의 칸 ID → 숫자 값(숫자가 아닌 칸은 None)."""
+    return {k: v["value"] for k, v in dsd_cells(dsd).items()}
 
 
 def build_map(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None = None, side: str = "") -> dict:
     """채움 결과(FillReport)와 최종 DSD 로 출처 기록을 만든다."""
-    final = final_values(dsd)
+    doc_cells = dsd_cells(dsd)
+    final = {k: v["value"] for k, v in doc_cells.items()}
     cells, n_over, n_miss = [], 0, 0
     for x in rep.items:
         if x.verdict != "채움" or not x.cell:
@@ -73,6 +79,8 @@ def build_map(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None
         e = {"cell": x.cell, "section": x.sheet, "table": x.table, "row": x.row_id, "label": x.label, "col": x.col,
              "value": x.value, "sources": [{"sheet": s, "cell": c} for s, c in x.sources], "scale": x.scale, "sign": x.sign,
              "how": x.how}
+        if x.cell in doc_cells:
+            e["row_label"] = doc_cells[x.cell]["row_label"]      # 칸 ID 가 그 뒤 밀렸는지 볼 때 맞춰 보는 행 이름
         if x.cell not in final:
             e["state"] = "missing"
             n_miss += 1
