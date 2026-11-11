@@ -140,7 +140,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 모든 명령은 `--json`을 주면 사람용 글 대신 이 형식 하나를 표준출력에 낸다(`inspect`의 `--json`은 문서 내용을 JSON으로 낸다는 뜻이라 예외).
 
 ```json
-{"schema": "dsdxlsx.result/1", "command": "apply", "version": "0.5.1",
+{"schema": "dsdxlsx.result/1", "command": "apply", "version": "0.6.0",
  "ok": true, "exit_code": 0, "outputs": ["보고서_수정.dsd"],
  "warnings": [], "errors": [],
  "dry_run": false, "changed": true, "structural": false,
