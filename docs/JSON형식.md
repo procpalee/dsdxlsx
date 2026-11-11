@@ -188,6 +188,9 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
 | `fill` | `period`, `side`, `counts`, `unfilled` |
 | `build` | `side`, `steps` |
+| `link make` | `side`, `sheets`, `accounts`, `note_tables`, `to_check`(sheet·label·issue·prior), `unlinked_tb`(DSD 행에 짝이 없는 TB 과목). `to_check`가 있으면 종료코드 1 |
+| `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1 |
+| `link refresh` | `accounts`, `added`(새로 붙인 계정 코드). 새 계정이 있으면 종료코드 1 |
 | `rollforward`, `roll-interim` | `counts`(자동확정·확인필요·미처리), `painted`, `todo`. `roll-interim`은 `period`, `dart`도 |
 | `renumber` | `notes`, `mapping`, `mentions`, `headings`, `ref_cells` |
 | `refoot` | `applied`, `items`, `skipped` |
@@ -270,6 +273,31 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 
 `annotate-ai --json`(풋팅 워크북)의 결과 필드: `kind: "foot"`, `status`(complete·partial), `items`, `verdicts`(최종 판정별 건수), `missing_ids`, `unknown_ids`, `duplicate_ids`, `to_check`(id·target·label·verdict·given·validation·reason·fix), `xref`(counts, proposals), `typos`(accepted·rejected·rejected_rows).
 사람이 봐야 할 항목(`to_check`)이 있으면 `--json`일 때 종료코드 1이다.
+
+### link 의 TB (`dsdxlsx.tb/1`)
+
+`link make --tb`와 `link refresh --tb`가 받는 계정별 금액이다. 금액은 차변이 +, 대변이 -다.
+
+```json
+{
+  "schema": "dsdxlsx.tb/1",
+  "period": {"cur": "2026.12.31", "pri": "2025.12.31"},
+  "rows": [
+    {"code": "101", "name": "현금", "settle": "현금및현금성자산", "cur": 150, "aje": 0, "pri": 100},
+    {"code": "109", "name": "대손충당금", "settle": "대손충당금(매출채권)", "cur": -120, "pri": -100}
+  ]
+}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `code` | 계정 코드. 없으면 `name`을 쓴다. `link refresh`가 이 값으로 줄을 찾는다 |
+| `name` | 계정과목(필수) |
+| `settle` | 정산 과목 - 재무제표에 나오는 이름. DSD 행 이름과 짝짓는 열쇠다. 없으면 `name`. 차감 계정은 `대손충당금(매출채권)`처럼 짝 자산을 괄호에 적는다 |
+| `sub` | 공시용 과목(선택). DSD 행 이름이 이것과 같으면 그 아래 정산 과목을 모두 그 행에 묶는다 |
+| `cur`, `aje`, `pri` | 당기 회사 제시 금액, 수정분개, 전기 금액. 정산표의 당기 = `cur` + `aje` |
+
+짝짓기는 전기 금액으로 확인하므로 `pri`가 뼈대 DSD의 전기 칸과 맞아야 한다. 같은 내용을 엑셀이나 CSV 표로 줘도 된다(머리글 `계정과목` 필수, `코드`, `정산 과목`, 금액 열은 `당기`·`전기`나 기준일).
 
 ### dart 결과
 

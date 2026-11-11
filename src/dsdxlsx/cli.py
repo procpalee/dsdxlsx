@@ -26,6 +26,7 @@ INPUTS = {
     "rollforward": {"dsd": "dsd"},
     "roll-interim": {"dsd": "dsd", "prior_same": "dsd", "prior_annual": "dsd"},
     "renumber": {"dsd": "dsd"}, "calibrate": {"dsd": "dsd"}, "ties": {"xlsx": "xlsx"},
+    "link": {"dsd": "dsd", "workbook": "xlsx"},
 }
 # 결과 봉투를 스스로 내는 명령(나머지는 main 이 감싼다)
 SELF_EMIT = ("apply", "dart")
@@ -1187,6 +1188,136 @@ def _recon_inputs(args, doc):
     return side, conf, sheets
 
 
+def _link_tb(args):
+    """link 의 TB 입력 - 종속기업 TB 나 연결조정을 주면 연결 정산표용으로 합친다."""
+    from .link import tbsrc
+
+    if getattr(args, "sub_tb", None) or getattr(args, "adj", None):
+        tb, info = tbsrc.load_consolidated(args.tb, list(args.sub_tb or []), args.adj, args.tb_sheet)
+        return tb, info, True
+    tb, info = tbsrc.load(args.tb, args.tb_sheet)
+    return tb, info, False
+
+
+def _link_side_conf(config: str | None, side: str) -> dict | None:
+    import json
+
+    if config and os.path.exists(config):
+        with open(config, encoding="utf-8") as f:
+            return (json.load(f).get(side)) or None
+    return None
+
+
+def cmd_link_make(args) -> int:
+    """뼈대 DSD + TB → DSD 행 그대로인 정산표(TB · BS · IS · SCE · CF · 주석 · 연결점검)."""
+    import json
+
+    from . import docview, theme
+    from . import period as P
+    from .link import core
+
+    out = args.out or os.path.splitext(args.dsd)[0] + "_정산표.xlsx"
+    guard.check_out([out], force=args.force, inputs=[args.dsd] + ([args.tb] if os.path.isfile(args.tb) else []))
+    tb, info, cons = _link_tb(args)
+    with open(args.dsd, "rb") as f:
+        data = f.read()
+    parsed = parse_contents(read_dsd(args.dsd).contents)
+    per = P.detect_period(parsed)
+    cons = cons or bool(per and per.consolidated)
+    doc = docview.doc_dict(parsed, source=os.path.basename(args.dsd), data=data)
+    wb, summary = core.make(doc, tb, info, company=args.company or "", title=args.title, ref=args.ref or "",
+                            author=theme.author(), consolidated=cons, source=doc["file"], sha256=doc.get("sha256", ""))
+    theme.set_author(wb)
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    wb.save(out)
+    guard.remember(out)
+    outputs = [out]
+    if args.config:
+        conf_all: dict = {}
+        if os.path.exists(args.config):
+            with open(args.config, encoding="utf-8") as f:
+                conf_all = json.load(f)
+        conf_all[summary["side"]] = core.recon_config()
+        with open(args.config, "w", encoding="utf-8") as f:
+            json.dump(conf_all, f, ensure_ascii=False, indent=2)
+        outputs.append(args.config)
+    todo, unlinked = summary["to_check"], summary["unlinked_tb"]
+    _note(args, outputs=outputs, **summary)
+    print(f"정산표 저장: {out}")
+    print(f"  {summary['side']} · 계정 {summary['accounts']}개 · 시트 {', '.join(summary['sheets'])} · 주석 표 {summary['note_tables']}개")
+    if todo:
+        print(f"  확인할 것 {len(todo)}건 - '연결점검' 시트")
+        for x in todo[:20]:
+            print(f"    [{x['sheet']}] {x['label']}: {x['issue']}")
+    if unlinked:
+        print(f"  DSD 행에 짝이 없는 TB 과목 {len(unlinked)}개(TB 시트의 노란 칸): {', '.join(unlinked[:10])}")
+    print("  엑셀에서 열어 저장하면 수식 값이 계산됩니다. 연결 확인은 `dsdxlsx link test`.")
+    return 1 if todo else 0
+
+
+def _is_link_tb(ws) -> bool:
+    from .link.sheetkit import HDR_ROW
+
+    return str(ws.cell(HDR_ROW, 2).value or "") == "코드" and str(ws.cell(HDR_ROW, 5).value or "").replace(" ", "") == "DSD행"
+
+
+def cmd_link_refresh(args) -> int:
+    """정산표 TB 시트의 금액만 다시 넣는다(사람이 고친 'DSD 행'과 다른 시트는 그대로)."""
+    from openpyxl import load_workbook
+
+    from .link import core
+
+    tb, _info, _cons = _link_tb(args)
+    wb = load_workbook(args.workbook)
+    if "TB" not in wb.sheetnames or not _is_link_tb(wb["TB"]):
+        raise guard.InputError("link make 로 만든 정산표가 아닙니다(TB 시트의 머리글이 다름): %s" % args.workbook)
+    was_ours = guard.untouched(args.workbook)
+    res = core.refresh(wb, tb)
+    try:
+        wb.save(args.workbook)
+    except PermissionError:
+        raise guard.InputError("정산표가 열려 있어 저장하지 못했습니다 - 엑셀을 닫고 다시 실행하세요: %s" % args.workbook)
+    if was_ours:
+        guard.remember(args.workbook)
+    _note(args, outputs=[args.workbook], accounts=res["accounts"], added=res["added"])
+    print(f"TB 금액을 다시 넣었습니다: {args.workbook}")
+    print(f"  계정 {res['accounts']}개" + (f" · 새 계정 {len(res['added'])}개(맨 아래, 'DSD 행'을 정하세요)" if res["added"] else ""))
+    return 1 if res["added"] else 0
+
+
+def cmd_link_test(args) -> int:
+    """왕복 시험 - 사본의 당기에 전기 금액을 넣고 build 해서 결과 DSD 당기 칸 = 전기 칸인지 본다."""
+    from openpyxl import load_workbook
+
+    from . import build as B
+    from .link import calc, core, roundtrip
+
+    wb = load_workbook(args.workbook, read_only=True)
+    try:
+        if "TB" not in wb.sheetnames:
+            raise guard.InputError("정산표에 TB 시트가 없습니다: %s" % args.workbook)
+        side = (core.read_link(wb) or {}).get("side") or "별도"
+    finally:
+        wb.close()
+    conf = _link_side_conf(args.config, side)
+    try:
+        res = roundtrip.run(args.dsd, args.workbook, conf=conf, recipe=B.load_recipe(args.recipe), notes=args.notes,
+                            workdir=args.workdir)
+    except calc.CalcError as e:
+        raise guard.InputError("%s - 이 수식은 엑셀 없이 계산할 수 없습니다" % e)
+    bad = res["diff"] + res["blank"] + res["note_diff"] + res["note_blank"]
+    _note(args, warnings=res["warnings"], side=side, same=res["same"], diff=res["diff"], blank=res["blank"],
+          note_same=res["note_same"], note_diff=res["note_diff"], note_blank=res["note_blank"], steps=res["steps"])
+    print(f"왕복 시험({side}) - 재무제표 같음 {res['same']}칸 · 다름 {len(res['diff'])}칸 · 빈칸 {len(res['blank'])}칸"
+          + (f" / 주석 같음 {res['note_same']}칸 · 다름 {len(res['note_diff'])}칸 · 빈칸 {len(res['note_blank'])}칸" if args.notes else ""))
+    for kind, items in (("다름", res["diff"]), ("빈칸", res["blank"]), ("주석 다름", res["note_diff"]), ("주석 빈칸", res["note_blank"])):
+        for x in items[:40]:
+            print(f"  [{kind}] {x['section']} · {x['label']}: 결과 {x['built']} / 전기 {x['expected']}")
+    if not bad:
+        print("  정산표의 당기 칸이 DSD 당기 칸까지 모두 이어집니다.")
+    return 1 if bad else 0
+
+
 def cmd_fill(args) -> int:
     from . import fill as F
     from . import splice
@@ -1297,6 +1428,7 @@ HELP_GROUPS = """\
                 recheck  calibrate  ties
   다음 기간     rollforward(연차)  roll-interim(분·반기)  renumber(주석 번호)
   조서와 맞추기 recon(대사)  fill(당기 칸 채움)  build(정산표로 다시 만들기)  disc(8400 점검표)
+                link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험)
   두 판 비교    diff(HTML 보고서)  verify(구조 비교)
   엑셀 없이     inspect(읽기·목차·찾기)  apply(JSON 편집)  annotate-ai(AI 검토 기록)
 
@@ -1395,7 +1527,7 @@ def _run(args) -> int:
     extra = dict(res["extra"])
     if extra.pop("log", True):               # 구조화한 결과가 충분한 명령(check)은 사람용 줄을 싣지 않는다
         extra["log"] = [ln.rstrip() for ln in so.getvalue().splitlines() if ln.strip()]
-    name = args.cmd + (" " + args.tcmd if args.cmd == "ties" else "")
+    name = args.cmd + (" " + args.tcmd if args.cmd in ("ties", "link") else "")
     return R.emit(R.envelope(name, code, outputs=res["outputs"], warnings=warnings, errors=errors,
                              **extra))
 
@@ -1666,6 +1798,44 @@ def main(argv=None) -> int:
     ps.add_argument("--profile", help="회사명 (기본: 임베드 원본 meta.xml의 회사명)")
     ps.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     ps.set_defaults(func=cmd_ties_save)
+
+    p = sub.add_parser("link", help="정산표와 DSD 연결 - 뼈대 DSD 행 그대로 정산표 만들기 · TB 금액 다시 넣기 · 왕복 시험")
+    lsub = p.add_subparsers(dest="tcmd", required=True)
+    json_help = "결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)"
+
+    def tb_args(q):
+        q.add_argument("--tb", required=True, help="TB - JSON(dsdxlsx.tb/1) · CSV · 엑셀 표, 또는 계정 체계 폴더")
+        q.add_argument("--tb-sheet", help="TB 가 엑셀일 때 시트 이름(기본: 'TB' 시트, 없으면 첫 시트)")
+        q.add_argument("--sub-tb", action="append", default=[], help="연결: 종속기업 TB(여러 번 줄 수 있음)")
+        q.add_argument("--adj", help="연결: 전기 연결조정 목록 JSON")
+
+    pm = lsub.add_parser("make", help="뼈대 DSD + TB → 정산표(TB · BS · IS · SCE · CF · 주석 · 연결점검)")
+    pm.add_argument("dsd", help="뼈대 .dsd (전기 DSD 를 밀어 당기 칸을 비운 것)")
+    tb_args(pm)
+    pm.add_argument("--company", help="머리말에 적을 회사명")
+    pm.add_argument("--title", help="머리말의 문서 이름(기본: 정산표 / 연결정산표)")
+    pm.add_argument("--ref", help="머리말의 문서 번호")
+    pm.add_argument("--config", help="recon · fill · build 가 읽을 설정 JSON 에 이 정산표의 시트 지정을 적는다")
+    pm.add_argument("--force", action="store_true", help="출력 파일을 고친 흔적이 있어도 덮어씀")
+    pm.add_argument("-o", "--out", help="출력 .xlsx (기본: <뼈대>_정산표.xlsx)")
+    pm.add_argument("--json", action="store_true", help=json_help)
+    pm.set_defaults(func=cmd_link_make)
+
+    pr = lsub.add_parser("refresh", help="정산표 TB 시트의 금액만 다시 넣기(새 계정은 맨 아래)")
+    pr.add_argument("workbook", help="link make 로 만든 정산표 .xlsx (그 파일에 저장)")
+    tb_args(pr)
+    pr.add_argument("--json", action="store_true", help=json_help)
+    pr.set_defaults(func=cmd_link_refresh)
+
+    pt = lsub.add_parser("test", help="왕복 시험 - 당기에 전기 금액을 넣어 build 한 결과가 전기 칸과 같은지(엑셀 없이 계산)")
+    pt.add_argument("dsd", help="뼈대 .dsd")
+    pt.add_argument("workbook", help="정산표 .xlsx (원본은 건드리지 않고 사본으로 시험)")
+    pt.add_argument("--config", help="건별 설정 JSON(build 와 같은 파일)")
+    pt.add_argument("--recipe", help="빌드 레시피 JSON")
+    pt.add_argument("--notes", action="store_true", help="주석 표의 당기 칸도 시험")
+    pt.add_argument("--workdir", help="시험 사본과 결과 DSD 를 남길 폴더(기본: 임시 폴더)")
+    pt.add_argument("--json", action="store_true", help=json_help)
+    pt.set_defaults(func=cmd_link_test)
 
     args = ap.parse_args(_fix_json_flag(list(sys.argv[1:] if argv is None else argv)))
     return _run(args)

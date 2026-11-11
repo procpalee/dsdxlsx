@@ -61,6 +61,7 @@ dsdxlsx check <DSD> --json
 - 연차: `dsdxlsx rollforward <전기 DSD> --json` → `_차기기초.dsd`와 정산표(엑셀).
 - 분·반기: `dsdxlsx roll-interim <직전 중간보고서 DSD> --prior-same <전년 동기 DSD> --json`.
 - `todo`(확인필요·미처리)를 사용자에게 그대로 전한다.
+- 정산표: `dsdxlsx link make <뼈대 DSD> --tb <TB> --json` → `<뼈대>_정산표.xlsx`. `to_check`와 `unlinked_tb`를 사용자에게 전하고, `dsdxlsx link test <뼈대 DSD> <정산표> --notes --json`의 `diff`·`blank`가 비었는지 확인한다. TB 형식은 `docs/JSON형식.md`의 `dsdxlsx.tb/1`.
 
 ### E. DART에서 받기
 

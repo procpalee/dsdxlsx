@@ -15,6 +15,7 @@ DART 전자공시 편집기 문서(DSD)를 엑셀로 열어 고치고 다시 DSD
 | 두 DSD에서 화면에 보이는 차이를 HTML 한 장으로 보여 준다 | `diff` |
 | 전기 DSD로 당기 기초 DSD와 정산표를 만든다 | `rollforward` |
 | 직전 분·반기 DSD로 다음 분기 DSD를 만들고, 당기 칸을 조서에서 채운다 | `roll-interim`, `fill`, `build` |
+| 뼈대 DSD의 행 그대로 정산표를 만들어 TB와 수식으로 잇고, 그 연결이 DSD까지 이어지는지 왕복으로 확인한다 | `link` |
 | DSD 숫자를 조서(최종분석적검토, 정산표)와 칸마다 맞춰 본다 | `recon` |
 | 한공회 공시사항점검표의 해당 여부와 주석 번호를 채운다 | `disc` |
 | 엑셀 없이 DSD를 읽고(목차, 찾기, 마크다운·JSON) JSON 편집 목록으로 고친다. 모든 명령이 `--json` 결과를 내서 LLM이나 스크립트가 쓰기 좋다 | `inspect`, `apply` |
@@ -156,6 +157,23 @@ uv run --no-editable dsdxlsx build 뼈대.dsd 정산표.xlsx --config _engagemen
 #    레시피는 고객 시트명·행 번호가 들어가므로 건 폴더(_engagement)에만 둔다(저장소에 넣지 않음). 키 설명은 build.py 머리.
 #    재현 시험(2026-10-31, E사 3분기 별도 PA): 건별 덮어쓰기 스크립트를 레시피로 옮겨 build → 당시 빌드 결과와
 #      contents.xml 바이트 동일. 빌드 뒤 원문 패치(자본변동표 소계 줄)를 뼈대로 옮기면 최종본과 바이트 동일.
+
+# 1-1f) 정산표 만들기: 뼈대 DSD 행 그대로 정산표를 만들어 TB 와 수식으로 잇는다
+uv run --no-editable dsdxlsx link make 뼈대.dsd --tb tb.json [--company 회사명] [--config 설정.json] [-o 정산표.xlsx]
+uv run --no-editable dsdxlsx link test 뼈대.dsd 뼈대_정산표.xlsx [--config 설정.json] [--notes]
+uv run --no-editable dsdxlsx link refresh 뼈대_정산표.xlsx --tb tb.json
+#    make: 시트 TB(계정 → 'DSD 행') · BS · IS · SCE · CF · 주석 · 연결점검. 재무제표 시트의 행은 뼈대 DSD 행 순서 그대로이고
+#      당기 칸은 TB 를 SUMIF 로 끌어온다. 합계 줄은 전기 금액으로 구성이 확인된 것만 수식, 아니면 입력칸(크림).
+#      짝짓기: 정산 과목 이름 = DSD 행 이름 → 전기 금액 → 남은 과목 묶음(최대 4개). 못 맞춘 것은 '연결점검' 시트와 종료코드 1.
+#      차감 계정(대손충당금 · 감가상각누계액)은 바로 위 자산과 짝, 재고 구성 줄(기초 · 매입 · 기말)은 재무상태표에서 수식.
+#    TB(--tb): JSON(dsdxlsx.tb/1 - docs/JSON형식.md) · CSV · 엑셀 표(머리글 '계정과목', 금액 열은 '당기'/'전기'나 기준일),
+#      또는 계정 체계 폴더(levels.csv · coa.csv · tb.csv · aje.csv · tb.json). 금액은 차변 +.
+#      연결은 --sub-tb 종속기업TB(여러 번) --adj 전기연결조정.json.
+#    test: 정산표 사본의 당기에 전기 금액을 넣어 계산하고 build 한 뒤, 결과 DSD 당기 칸 = 전기 칸인지 본다.
+#      다르거나 빈 칸이 그 행의 연결이 끊긴 곳이다. 엑셀 없이 계산한다(SUM · SUMIF · 사칙연산만, 다른 함수는 오류).
+#      원본 정산표와 뼈대는 건드리지 않는다.
+#    refresh: TB 시트의 금액만 다시 넣는다. 사람이 고친 'DSD 행'은 그대로, 새 계정은 맨 아래(노란 칸).
+#    그 뒤: 정산표를 엑셀에서 열어 저장(수식 값 계산) → dsdxlsx build 뼈대.dsd 정산표.xlsx [--config 설정.json]
 
 # 1-1c) DSD ↔ 조서 대사: 재무제표·주석 칸마다 조서(최종분석적검토·PA 정산표·연결정산표)에서 같은 값 찾기
 uv run --no-editable dsdxlsx recon 보고서.dsd 8110_최종분석적검토.xlsx     # → 보고서_조서대사.xlsx
