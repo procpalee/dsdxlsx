@@ -1404,9 +1404,11 @@ def cmd_fill(args) -> int:
         F.write_fill_report(rep, report, args.file, args.workpaper)
     except PermissionError:
         report = "(결과 엑셀이 열려 있어 저장 못 함)"
+    from . import srcmap
+    map_path, map_counts = srcmap.save(rep, dsd=out, skeleton=args.file, workbook=args.workpaper, side=side)
     unfilled = [x for x in rep.items if x.verdict == "못 채움"]
-    _note(args, outputs=[out] + ([report] if os.path.exists(report) else []), warnings=rep.warnings,
-          period=rep.period, side=side, counts={"채움": rep.count("채움"), "못 채움": len(unfilled)},
+    _note(args, outputs=[out] + ([report] if os.path.exists(report) else []) + [map_path], warnings=rep.warnings,
+          period=rep.period, side=side, counts={"채움": rep.count("채움"), "못 채움": len(unfilled)}, map=map_path,
           unfilled=[{"sheet": x.sheet, "label": x.label, "col": x.col, "how": x.how}
                     for x in unfilled[:200]])
     print(f"보고기간 {rep.period}({side}) - 채움 {rep.count('채움')}칸 · 못 채움 {rep.count('못 채움')}칸")
@@ -1414,7 +1416,7 @@ def cmd_fill(args) -> int:
         print(f"  [주의] {w}")
     for x in [x for x in rep.items if x.verdict == "못 채움"][:30]:
         print(f"  (못 채움) [{x.sheet}] {x.label[:24]} × {x.col[:16]}: {x.how}")
-    print(f"\nDSD 저장: {out}\n결과: {report}")
+    print(f"\nDSD 저장: {out}\n결과: {report}\n칸별 출처 기록: {map_path}")
     print("다음: dsdxlsx recon 으로 대사 · dsdxlsx check 로 합계 검산")
     return 1 if (_envelope(args) and unfilled) else 0
 
@@ -1444,11 +1446,17 @@ def cmd_build(args) -> int:
                   workdir=args.workdir)
     B.save_last_build(out)
     guard.remember(out)
-    _note(args, outputs=[out], warnings=rep.warnings, side=side, steps=list(rep.steps))
+    from . import srcmap
+    map_path, map_counts = srcmap.save(rep.fill, dsd=out, skeleton=args.file, workbook=args.workpaper, recipe=args.recipe,
+                                       side=side)
+    _note(args, outputs=[out, map_path], warnings=rep.warnings, side=side, steps=list(rep.steps), map=map_path,
+          map_counts=map_counts)
     print(f"build({side}) - " + " · ".join(rep.steps))
     for w in rep.warnings[:40]:
         print(f"  [주의] {w}")
     print(f"\nDSD 저장: {out}")
+    print(f"칸별 출처 기록: {map_path} ({map_counts['cells']}칸"
+          + (f", 그중 레시피가 다시 고친 칸 {map_counts['overridden']}" if map_counts["overridden"] else "") + ")")
     if args.no_check:
         return 0
     base = os.path.splitext(out)[0]

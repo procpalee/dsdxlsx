@@ -186,8 +186,8 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
 | `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error`. `--dart-tie`면 `dart`(status·reason·total·pass·fail·sources·unmatched)가 붙고 `mismatches`에 `kind: "dart"`(current·dart 값 포함)가 더해진다. 건너뛴 사유는 `warnings`. `--review`면 `review`(path·items·note_sheets·texts·texts_truncated) |
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
-| `fill` | `period`, `side`, `counts`, `unfilled` |
-| `build` | `side`, `steps` |
+| `fill` | `period`, `side`, `counts`, `unfilled`, `map`(칸별 출처 기록 파일 경로 - `outputs`에도 들어 있다) |
+| `build` | `side`, `steps`, `map`, `map_counts`(cells·overridden·missing·unfilled) |
 | `tb` | `erp`(더존·세무사랑), `period`(cur·pri), `accounts`, `no_code`(계정코드를 못 찾아 코드 자리에 `*이름`을 둔 계정), `files`(읽은 파일), `rules`(쓴 규칙 파일, 안 썼으면 `null`). 경고가 있으면 종료코드 1, 자료가 모자라거나 부호합이 안 맞으면 2 |
 | `link make` | `side`, `sheets`, `accounts`, `note_tables`, `to_check`(sheet·label·issue·prior), `unlinked_tb`(DSD 행에 짝이 없는 TB 과목), TB가 표일 때 `tb_columns`(읽은 당기·전기 열의 머리글). `to_check`가 있으면 종료코드 1 |
 | `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1 |
@@ -274,6 +274,36 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 
 `annotate-ai --json`(풋팅 워크북)의 결과 필드: `kind: "foot"`, `status`(complete·partial), `items`, `verdicts`(최종 판정별 건수), `missing_ids`, `unknown_ids`, `duplicate_ids`, `to_check`(id·target·label·verdict·given·validation·reason·fix), `xref`(counts, proposals), `typos`(accepted·rejected·rejected_rows).
 사람이 봐야 할 항목(`to_check`)이 있으면 `--json`일 때 종료코드 1이다.
+
+### 칸별 출처 기록 (`dsdxlsx.map/1`)
+
+`fill`과 `build`가 출력 DSD 옆 `_build/<DSD 이름>.map.json`에 쓴다. DSD 칸마다 값을 가져온 정산표 칸을 적어 두어, DSD에서 고친 숫자를 정산표의 어느 칸에 반영할지 찾는 데 쓴다.
+
+```json
+{
+  "schema": "dsdxlsx.map/1",
+  "side": "별도",
+  "dsd": {"file": "보고서.dsd", "sha256": "…"},
+  "skeleton": {"file": "뼈대.dsd", "sha256": "…"},
+  "workbook": {"file": "정산표.xlsx", "sha256": "…"},
+  "recipe": null,
+  "counts": {"cells": 320, "overridden": 0, "missing": 0, "unfilled": 12},
+  "cells": [
+    {"cell": "t003.r004.c02", "section": "재무상태표", "table": "t003", "row": "t003.r004", "label": "대손충당금",
+     "col": "제 2(당) 기말", "value": -120.0, "sources": [{"sheet": "BS", "cell": "C11"}], "scale": 1.0, "sign": -1,
+     "how": "앵커(전기 값 일치)"}
+  ]
+}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `cells[].cell` | DSD 칸 ID(`inspect`의 칸 ID와 같다) |
+| `value` | 채울 때 쓴 값. `sign × (sources 칸의 합) × scale`을 DSD 자릿수로 반올림한 것이다 |
+| `sources` | 값을 가져온 정산표 칸. 여러 개면 그 합(하위 계정 합). 비어 있으면 정산표 칸 없이 계산한 값(위 칸의 합)이다 |
+| `scale`, `sign` | 정산표 값에 곱한 배율(원과 천원, 율은 100)과 부호(차감 계정을 양수로 적는 정산표는 -1) |
+| `state` | `overridden`이면 채운 뒤 레시피나 글 바꾸기가 그 칸을 다시 고쳤다(`final`이 최종 값). `missing`이면 최종 DSD에 그 칸이 없다. 없으면 기록대로다 |
+| `dsd`, `skeleton`, `workbook`, `recipe` | 만든 때의 파일 이름과 sha256. 그 뒤 파일이 바뀌었는지 볼 때 쓴다 |
 
 ### link 의 TB (`dsdxlsx.tb/1`)
 

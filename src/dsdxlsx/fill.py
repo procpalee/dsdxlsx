@@ -44,6 +44,11 @@ class FillItem:
     verdict: str         # 채움 | 못 채움
     how: str = ""        # 앵커 · 하나뿐 · 단위 · 부호 / 못 채운 이유
     where: str = ""      # 조서 위치
+    # 출처 기록(srcmap): DSD 칸 값 = sign × (sources 칸의 합) × scale
+    cell: str = ""       # DSD 칸 ID
+    sources: list = field(default_factory=list)   # [(조서 시트, 칸 주소)] - 비면 조서 칸 없이 계산(위 칸 합)
+    scale: float | None = None
+    sign: int | None = None
 
 
 @dataclass
@@ -59,6 +64,11 @@ class FillReport:
 def _ref(row: WpRow, col: int) -> str:
     from openpyxl.utils import get_column_letter
     return f"{row.sheet}!{get_column_letter(col + 1)}{row.row}"
+
+
+def _src(row: WpRow, col: int) -> tuple[str, str]:
+    from openpyxl.utils import get_column_letter
+    return row.sheet, f"{get_column_letter(col + 1)}{row.row}"
 
 
 def _scales(unit: int, wp_unit: int, rate: bool) -> list[float]:
@@ -174,7 +184,7 @@ def fill_ops(doc: Document, sheets: list[WpSheet], config: ReconConfig | None = 
                 if cur_v is None and cell.text.strip():
                     continue                       # 글 칸
                 item = FillItem(ctx, tv.table.id, tv.table.rows[i].id, label[:40],
-                                tv.col_header(c)[:30].replace("\n", " "), None, "못 채움")
+                                tv.col_header(c)[:30].replace("\n", " "), None, "못 채움", cell=cell.id)
                 if not label.strip() or (cfg.exclude and cfg.excluded(_as_recon_item(item, ctx))):
                     continue
                 stale = " · 이전 값 남음" if cur_v is not None else ""
@@ -251,6 +261,7 @@ def fill_ops(doc: Document, sheets: list[WpSheet], config: ReconConfig | None = 
                 last_row[used[0][0].sheet] = max(r.row for r, _c in used)
                 item.value, item.verdict = val, "채움"
                 item.where = ", ".join(_ref(r, cc) for r, cc in used[:3])
+                item.sources, item.scale, item.sign = [_src(r, cc) for r, cc in used], sc, sg
                 item.how = how + (" · 부호 반대 관례" if fit and fit[1] < 0 else "") + (" · 새 행(위 행 열)" if no_prev else "")
                 rep.items.append(item)
                 # 짝 전기 칸이 비어 있고 조서에 전기 값이 있으면 같은 단위 · 부호로
@@ -261,7 +272,8 @@ def fill_ops(doc: Document, sheets: list[WpSheet], config: ReconConfig | None = 
                         _put(ops, tv, i, pc, None, pval, new_vals)
                         rep.items.append(FillItem(ctx, tv.table.id, tv.table.rows[i].id, label[:40],
                                                   tv.col_header(pc)[:30].replace("\n", " "), pval, "채움",
-                                                  "전기 빈칸 - 조서 전기 값", _ref(o[0], o[1])))
+                                                  "전기 빈칸 - 조서 전기 값", _ref(o[0], o[1]),
+                                                  cell=tv.cell(i, pc).id, sources=[_src(o[0], o[1])], scale=sc, sign=sg))
         if rec.kind == "PL":
             relabel_pl(rec, new_vals, ops, rep, ctx)
     return ops, rep

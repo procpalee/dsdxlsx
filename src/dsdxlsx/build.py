@@ -56,6 +56,7 @@ class BuildReport:
     unfilled: int = 0
     steps: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    fill: object = None      # 채움 결과(FillReport) - 칸별 출처 기록(srcmap)에 쓴다
 
 
 def load_recipe(path: str | None) -> dict:
@@ -502,7 +503,7 @@ def build(skeleton: str, workpaper: str, out: str, *, recipe: dict, fill_conf: d
     doc = parse_contents(package.contents)
     ops, frep = F.fill_ops(doc, side_sheets, R.ReconConfig.from_dict(fill_conf))
     filled = splice.apply(package.contents, ops)
-    rep.filled, rep.unfilled = frep.count("채움"), frep.count("못 채움")
+    rep.filled, rep.unfilled, rep.fill = frep.count("채움"), frep.count("못 채움"), frep
     rep.steps.append(f"채움 {rep.filled}칸 · 못 채움 {rep.unfilled}칸")
     f_dsd, f_xlsx, r_xlsx = (os.path.join(work, n) for n in ("1_채움.dsd", "1_채움.xlsx", "2_레시피.xlsx"))
     write_dsd(f_dsd, package, filled)

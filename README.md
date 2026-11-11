@@ -153,6 +153,9 @@ uv run --no-editable dsdxlsx build 뼈대.dsd 정산표.xlsx --config _engagemen
 #      label(행 이름 짝짓기 - 같은 이름은 나온 순서대로, range 는 행 ID 또는 행 이름 글)·order(첫 행부터 rows 순서대로).
 #      열 서식 rate2·raw·prefix_by_row(외화 'USD 1,800,000'), keep_currency, 칸 하나는 cells 의 template('{D12*100:.2f}').
 #    unit_suffix·keep 은 reference(직전 최종 DSD)의 같은 표·행·열을 본다('주'·'%' 기호, 바뀌지 않는 값).
+#    칸별 출처 기록: fill 과 build 는 DSD 칸마다 값을 가져온 정산표의 시트 · 칸 · 배율 · 부호를
+#      <출력 폴더>/_build/<이름>.map.json 에 남긴다(형식은 docs/JSON형식.md 의 dsdxlsx.map/1).
+#      DSD 에서 숫자를 고쳤을 때 정산표의 어느 칸에 반영할지 찾는 데 쓴다. 레시피가 다시 고친 칸은 표시된다.
 #    빌드 밖 수정 감지: 지난 build 결과를 <출력 폴더>/_build/<이름>.last.dsd 에 두고, 출력 DSD 가 그와 다르면
 #      바뀐 칸을 보여 주고 멈춤(--force 로만 덮음). 숫자는 정산표로, 행·표·문구는 뼈대로 옮기라는 뜻.
 #    레시피는 고객 시트명·행 번호가 들어가므로 건 폴더(_engagement)에만 둔다(저장소에 넣지 않음). 키 설명은 build.py 머리.
