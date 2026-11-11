@@ -184,7 +184,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `import` | `changed`, `structural`, `changes`. 풋팅 워크북이면 `kind: "foot"`, `source`, `changed`, `edits`(cell·node·old·new) |
 | `export` | `sheets`, `tables`, `paras` |
 | `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
-| `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error`. `--dart-tie`면 `dart`(status·reason·total·pass·fail·sources·unmatched)가 붙고 `mismatches`에 `kind: "dart"`(current·dart 값 포함)가 더해진다. 건너뛴 사유는 `warnings` |
+| `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error`. `--dart-tie`면 `dart`(status·reason·total·pass·fail·sources·unmatched)가 붙고 `mismatches`에 `kind: "dart"`(current·dart 값 포함)가 더해진다. 건너뛴 사유는 `warnings`. `--review`면 `review`(path·items·note_sheets·texts·texts_truncated) |
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
 | `fill` | `period`, `side`, `counts`, `unfilled` |
 | `build` | `side`, `steps` |
@@ -218,6 +218,58 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 `stated`는 적힌 값, `computed`는 구성 칸으로 다시 계산한 값이다. 어느 쪽이 틀렸는지는 도구가 판단하지 않는다. 합계가 틀렸을 수도, 구성 칸이 틀렸을 수도 있으니 조서나 원자료로 확인한 뒤 고친다.
 `findings`의 `level`이 `warn`이나 `error`인 것이 하나라도 있으면 종료코드가 1이다. `info`는 참고다.
 `mismatches`에는 참고(`info`) 수준이거나 프로파일로 억제한 불일치도 들어 있어서, 종료코드가 0인데 `mismatches`가 비어 있지 않을 수 있다.
+
+### 풋팅 워크북 검토 (`foot --review` → `annotate-ai`)
+
+`foot --review`는 검토 재료(`dsdxlsx.foot-review/1`)를 파일로 낸다. 판정은 사람이나 에이전트가 하고, `annotate-ai`가 판정을 다시 검산해 워크북에 적는다.
+
+검토 재료:
+
+```json
+{"schema": "dsdxlsx.foot-review/1", "workbook": "보고서_풋팅.xlsx", "source": "보고서.dsd",
+ "source_sha256": "…", "company": "샘플전자(주)", "detection_profile": "standard",
+ "guide": {"caution": "…", "verdicts": ["수정필요", "무시가능", "도구오탐", "확인필요"],
+           "verdict": "판정 기준 …", "xref": "대사 제안 기준 …", "typo": "오탈자 기준 …"},
+ "items": [{"id": "F1", "sheet": "2", "cell": "C14", "target": "2!C13", "kind": "total_row",
+            "kind_desc": "합계류 라벨 행 = 위쪽 구성 행 합", "label": "당기말 합계",
+            "relation": "C13-(C11+C12)  [기재 1,200 / 항 값: C11=200, C12=1,100]",
+            "diff": "-100", "pretag": "금액 불일치", "stated": "1200", "expected": "1300",
+            "context": "B11=보유현금  C11=200 …"}],
+ "xref": {"statements": [{"sheet": "BS", "lines": ["B11 Ⅰ.유동자산 | D11=8,500 | E11=7,000"], "truncated": false}],
+          "notes": [{"sheet": "2", "lines": ["B11 보유현금 | C11=200 | D11=150"], "truncated": false}],
+          "linked": ["'2'!C13"]},
+ "texts": [{"cell": "B12", "text": "4. 현금및현금성자산⏎당기말과 …"}], "texts_truncated": false}
+```
+
+| 필드 | 뜻 |
+|---|---|
+| `items[].id` | `F…`는 풋팅, `X…`는 대사 차이. 판정의 `id`에 그대로 쓴다 |
+| `items[].target` | 대상 칸(`시트!칸`). `수정대상`에 그대로 쓴다 |
+| `items[].stated` / `expected` | 적힌 값 / 도구가 세운 관계식으로 계산한 값(대사 차이는 빈칸) |
+| `items[].pretag` | 도구의 사전 분류(금액 불일치, 절사차이, 비율 차이, 대사 차이) |
+| `xref.*.lines` | 시트의 값 행. `칸 라벨 \| 칸=값` 꼴이고 `(단위: …)`, `[머리글 N행]` 줄이 섞여 있다 |
+| `xref.linked` | 이미 대사된 대상 칸. 제안에서 뺀다 |
+| `texts[].text` | 원문 시트의 글. `⏎`는 편집기의 자동 줄바꿈이다 |
+
+판정 JSON(`annotate-ai`의 둘째 인자). 세 부분 모두 생략할 수 있다:
+
+```json
+{"reviewer": "판정한 쪽 이름",
+ "verdicts": [{"id": "F1", "판정": "수정필요", "근거": "구성 합 1,300과 100 차이",
+               "수정대상": "2!C13", "제안값": "1300", "수정제안": "합계를 1,300으로"}],
+ "xref": [{"src": "BS!D12", "dst": "'2'!C13", "이유": "현금및현금성자산 주석 합계 = 재무상태표"}],
+ "typos": [{"셀": "B12", "원문": "재무재표", "수정": "재무제표", "사유": "오타"}]}
+```
+
+다시 검산하는 규칙:
+
+- `수정필요`는 `수정대상`이 대상 칸과 같고 `제안값`이 `expected`와 같을 때만 유지한다. 아니면 `확인필요`로 낮춘다. 대사 차이는 어느 쪽이 틀렸는지 정할 수 없어 늘 `확인필요`다.
+- 판정이 빠졌거나 `id`가 겹친 항목은 `확인필요`로 남는다. 모르는 판정어도 `확인필요`가 된다.
+- `xref`는 워크북 값으로 맞춰 본다. 일치하면 주석 시트 오른쪽에 링크와 비교 수식을 심고(`반영(일치)`), 금액이 다르면 `불일치`, 형식이 틀렸거나 받을 수 없으면 `거부`와 사유를 낸다.
+- `typos`는 그 칸이 있고 `원문`이 그 칸의 글에 들어 있을 때만 받는다.
+
+`annotate-ai --json`(풋팅 워크북)의 결과 필드: `kind: "foot"`, `status`(complete·partial), `items`, `verdicts`(최종 판정별 건수), `missing_ids`, `unknown_ids`, `duplicate_ids`, `to_check`(id·target·label·verdict·given·validation·reason·fix), `xref`(counts, proposals), `typos`(accepted·rejected·rejected_rows).
+사람이 봐야 할 항목(`to_check`)이 있으면 `--json`일 때 종료코드 1이다.
 
 ### dart 결과
 

@@ -378,6 +378,8 @@ def cmd_foot(args) -> int:
                 rc = res.rc
                 if args.dart_tie and not args.convert_only:
                     rc = max(rc, _foot_dart_tie(args, res, item, warnings))
+                if args.review is not None and not args.convert_only:
+                    outputs.append(_foot_review(args, res, item))
                 guard.remember(str(out))
         except guard.Stopped as e:
             print(f"멈춤: {e}", file=sys.stderr)
@@ -392,6 +394,47 @@ def cmd_foot(args) -> int:
         worst = max(worst, rc)
     _note(args, outputs=outputs, warnings=warnings, files=results)
     return worst
+
+
+def _foot_review(args, res, item: dict) -> str:
+    """검출 항목·대사 제안 재료·원문 글을 검토 재료 JSON 으로 낸다(판정은 사람이나 에이전트가)."""
+    import json
+
+    from .foot import review
+
+    path = args.review or (os.path.splitext(str(res.out))[0] + "_검토재료.json")
+    data = review.build_review(res)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=1)
+    item["review"] = {"path": path, "items": len(data["items"]),
+                      "note_sheets": len(data["xref"]["notes"]), "texts": len(data["texts"]),
+                      "texts_truncated": data["texts_truncated"]}
+    print(f"  검토 재료: {path} (검출 {len(data['items'])}건, 주석 시트 {len(data['xref']['notes'])}개, "
+          f"글 칸 {len(data['texts'])}개) - 판정 JSON 을 만들어 annotate-ai 로 반영")
+    return path
+
+
+def _annotate_foot(args, data: dict) -> int:
+    """판정 JSON 을 풋팅 워크북에 반영 - 다시 검산해 맞는 것만. 확인할 것이 남으면 --json 일 때 1."""
+    from .foot import review
+
+    try:
+        applied = review.apply_findings(args.xlsx, data)
+    except review.FindingsError as e:
+        raise guard.InputError(str(e)) from None
+    except PermissionError:
+        print(f"오류: {args.xlsx} 이(가) 엑셀에서 열려 있어 기록할 수 없습니다.", file=sys.stderr)
+        return 2
+    d = applied.to_dict()
+    _note(args, outputs=[args.xlsx], kind="foot", **d)
+    v = " · ".join(f"{k} {n}" for k, n in d["verdicts"].items()) or "판정 없음"
+    x = " · ".join(f"{k} {n}" for k, n in d["xref"]["counts"].items()) or "없음"
+    print(f"검토 결과 기록: {args.xlsx} - 총괄표 아래 'AI 보조 검토 결과'")
+    print(f"  검출 {d['items']}건 판정: {v}" + (f" / 판정 빠짐 {len(d['missing_ids'])}건" if d["missing_ids"] else ""))
+    print(f"  대사 제안: {x} / 오탈자 받음 {d['typos']['accepted']}건 · 거부 {d['typos']['rejected']}건")
+    for row in d["to_check"][:20]:
+        print(f"    [{row['verdict']}] {row['target']} {row['label'][:30]} - {row['reason'][:60]}")
+    return 1 if (_envelope(args) and d["to_check"]) else 0
 
 
 def _foot_dart_tie(args, res, item: dict, warnings: list) -> int:
@@ -592,6 +635,10 @@ def cmd_annotate_ai(args) -> int:
 
     with open(args.findings, encoding="utf-8-sig") as f:
         data = _json.load(f)
+    from .foot import mapsheet as foot_map
+
+    if foot_map.is_foot_workbook(args.xlsx):
+        return _annotate_foot(args, data)
     findings = data.get("findings", [])
     if not isinstance(findings, list):
         print("findings.json 형식 오류 — {'findings': [...]} 필요", file=sys.stderr)
@@ -1431,6 +1478,9 @@ def main(argv=None) -> int:
                         "건너뜀). 각 시트 오른쪽 'DART:' 칸과 'DART원천' 시트에 남긴다")
     p.add_argument("--dart-fs", choices=("OFS", "CFS"),
                    help="DART 대사 대상을 별도(OFS)·연결(CFS)로 강제(기본: 문서에서 판별)")
+    p.add_argument("--review", nargs="?", const="", metavar="경로",
+                   help="검토 재료 JSON 도 낸다(검출 항목과 근거, 대사 제안 재료, 원문 글). 기본 경로: "
+                        "<워크북>_검토재료.json. 판정은 annotate-ai 로 반영")
     p.add_argument("--force", action="store_true", help="출력 파일이 고쳐졌거나 기록이 없어도 덮어씀")
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_foot)
@@ -1525,10 +1575,12 @@ def main(argv=None) -> int:
 
     p = sub.add_parser(
         "annotate-ai",
-        help="AI 검토 소견(findings.json)을 편집용 xlsx 'AI검토' 시트로 기록",
+        help="AI 검토 소견(findings.json)을 엑셀에 기록 - 편집용 엑셀은 'AI검토' 시트, 풋팅 워크북은 "
+             "판정을 다시 검산해 총괄표와 주석 시트에",
     )
     p.add_argument("xlsx")
-    p.add_argument("findings", help="/dsd-review 스킬이 만든 findings.json")
+    p.add_argument("findings", help="판정 JSON(편집용 엑셀: /dsd-review 의 findings.json, "
+                                    "풋팅 워크북: verdicts·xref·typos)")
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_annotate_ai)
 

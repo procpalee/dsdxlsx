@@ -49,6 +49,7 @@ dsdxlsx diff 보고서.dsd 보고서_수정.dsd                # 7. 사람에게
 | 칸·문단·행·표·주석 고치기 | `apply` |
 | 합계·대사·표기 검산 | `check` |
 | 사람이 볼 풋팅·대사 검증 워크북 | `foot` |
+| 풋팅 검출 항목 판정, 대사 제안, 오탈자 | `foot --review` → 판정 JSON → `annotate-ai` (스킬 `skills/dsd-foot-review`) |
 | 두 판 비교 | `diff`(사람용 HTML), `verify`(구조 차이 목록) |
 | 전기 DSD → 당기 기초 DSD + 정산표 | `rollforward`(연차), `roll-interim`(분·반기) |
 | DSD 숫자 ↔ 조서 대사, 당기 칸 채움 | `recon`, `fill`, `build` |

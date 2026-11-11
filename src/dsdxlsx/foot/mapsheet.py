@@ -64,7 +64,7 @@ class MapError(Exception):
     """워크북에 셀맵이 없거나 스키마가 다름."""
 
 
-def write(wb, dsd_bytes: bytes, source_name: str, cellmap: CellMap) -> None:
+def write(wb, dsd_bytes: bytes, source_name: str, cellmap: CellMap, extra: dict | None = None) -> None:
     """워크북(openpyxl Workbook)에 _map/_cellmap 시트를 추가한다. save 전에 호출."""
     for name in (MAP_SHEET, CELLMAP_SHEET):
         if name in wb.sheetnames:
@@ -74,7 +74,7 @@ def write(wb, dsd_bytes: bytes, source_name: str, cellmap: CellMap) -> None:
     ms["A1"] = json.dumps({
         "schema": SCHEMA, "tool": TOOL, "source": source_name,
         "sha256": hashlib.sha256(dsd_bytes).hexdigest(),
-        "n_cells": len(cellmap),
+        "n_cells": len(cellmap), **(extra or {}),
     }, ensure_ascii=False)
     b64 = base64.b64encode(dsd_bytes).decode("ascii")
     for i in range(0, len(b64), CHUNK):

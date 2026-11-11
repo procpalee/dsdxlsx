@@ -277,7 +277,7 @@ def write_checks(ws_of, checkset: CheckSet):
 
 def write_workbook(layouts: list[SheetLayout], checkset: CheckSet, out_path: str,
                    summary_writer=None, embed=None) -> None:
-    """embed=(dsd_bytes, source_name) 이면 셀맵(_map/_cellmap)을 함께 심는다 — writeback 전제."""
+    """embed=(dsd_bytes, source_name[, 더 적을 메타]) 이면 셀맵(_map/_cellmap)을 함께 심는다 — writeback 전제."""
     recorder = mapsheet.CellMap() if embed is not None else None
     wb = Workbook()
     # 최신 Office 테마(맑은 고딕 minor) 주입 — 기본 셀 폰트(scheme=minor)가
@@ -294,7 +294,7 @@ def write_workbook(layouts: list[SheetLayout], checkset: CheckSet, out_path: str
     if summary_writer is not None:
         summary_writer(summary, layouts, checkset)
     if embed is not None:
-        mapsheet.write(wb, embed[0], embed[1], recorder)
+        mapsheet.write(wb, embed[0], embed[1], recorder, extra=embed[2] if len(embed) > 2 else None)
     from ..theme import set_author
     set_author(wb)
     wb.save(out_path)
