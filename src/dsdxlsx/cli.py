@@ -1188,6 +1188,39 @@ def _recon_inputs(args, doc):
     return side, conf, sheets
 
 
+def cmd_tb(args) -> int:
+    """더존 · 세무사랑 자료(분개장 · 재무상태표 · 손익계산서 · 제조원가명세서) → TB JSON(dsdxlsx.tb/1)."""
+    import json
+
+    from .erp import settle as S
+    from .erp import tb as T
+
+    files = {k: v for k, v in (("분개장", args.journal), ("재무상태표", args.bs), ("손익계산서", args.pl),
+                               ("제조원가명세서", list(args.cost or []))) if v}
+    if not args.raw and not args.bs:
+        raise guard.InputError("자료 폴더나 --bs 재무상태표 파일을 지정하세요")
+    rules = None if args.no_rules else S.load(args.rules)
+    made = T.make(args.raw, year=args.year or 0, key=args.key or "", date=args.date or "", book=T.load_book(args.book),
+                  files=files)
+    doc = T.to_tb(made, rules)
+    out = args.out or os.path.join(args.raw or os.path.dirname(os.path.abspath(args.bs)), "TB_%s.json" % made["key"])
+    guard.check_out([out], force=args.force)
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(doc, f, ensure_ascii=False, indent=1)
+    guard.remember(out)
+    no_code = [r["name"] for r in doc["rows"] if r["code"].startswith("*")]
+    _note(args, outputs=[out], warnings=made["warnings"], erp=made["erp"], period=doc["period"], accounts=len(doc["rows"]),
+          no_code=no_code, files=made["files"], rules=rules.source if rules else None)
+    print(f"TB 저장: {out}")
+    print(f"  {made['erp']} · 기준일 {made['cur_date']} · 계정 {len(doc['rows'])}개 · 읽은 파일 {len(made['files'])}개")
+    if no_code:
+        print(f"  계정코드를 못 찾은 계정 {len(no_code)}개(코드 자리에 '*이름'): {', '.join(no_code[:10])}")
+    for w in made["warnings"][:20]:
+        print(f"  [주의] {w}")
+    print("  다음: dsdxlsx link make 뼈대.dsd --tb " + os.path.basename(out))
+    return 1 if made["warnings"] else 0
+
+
 def _link_tb(args):
     """link 의 TB 입력 - 종속기업 TB 나 연결조정을 주면 연결 정산표용으로 합친다."""
     from .link import tbsrc
@@ -1428,7 +1461,7 @@ HELP_GROUPS = """\
                 recheck  calibrate  ties
   다음 기간     rollforward(연차)  roll-interim(분·반기)  renumber(주석 번호)
   조서와 맞추기 recon(대사)  fill(당기 칸 채움)  build(정산표로 다시 만들기)  disc(8400 점검표)
-                link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험)
+                tb(더존 · 세무사랑 자료 → TB)  link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험)
   두 판 비교    diff(HTML 보고서)  verify(구조 비교)
   엑셀 없이     inspect(읽기·목차·찾기)  apply(JSON 편집)  annotate-ai(AI 검토 기록)
 
@@ -1798,6 +1831,23 @@ def main(argv=None) -> int:
     ps.add_argument("--profile", help="회사명 (기본: 임베드 원본 meta.xml의 회사명)")
     ps.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     ps.set_defaults(func=cmd_ties_save)
+
+    p = sub.add_parser("tb", help="더존 · 세무사랑에서 내려받은 분개장 · 재무제표 → TB JSON(link make 의 입력)")
+    p.add_argument("raw", nargs="?", help="자료 폴더 - 분개장_회사_2025.xlsx · 재무상태표_… · 손익계산서_… (제조업은 제조원가명세서_…)")
+    p.add_argument("--key", help="파일 이름 꼬리: 2025(결산일 자료) 또는 202509(기준연월 자료). 기본: 재무상태표가 있는 가장 최근 연도")
+    p.add_argument("--year", type=int, help="당기 연도(--key 를 안 줄 때)")
+    p.add_argument("--date", help="기준일 2025.09.30 - 재무상태표 날짜가 다르면 멈추고, 분개장은 그날까지만 쓴다")
+    p.add_argument("--book", help="이미 아는 회사 계정 {코드: 이름} JSON - 분개장에 거래가 없는 계정의 코드")
+    p.add_argument("--journal", help="분개장 파일을 직접 지정")
+    p.add_argument("--bs", help="재무상태표 파일을 직접 지정")
+    p.add_argument("--pl", help="손익계산서 파일을 직접 지정")
+    p.add_argument("--cost", action="append", help="제조원가명세서 파일을 직접 지정(여러 번 줄 수 있음)")
+    p.add_argument("--rules", help="정산 과목 규칙 TOML(기본: 환경변수 DSDXLSX_SETTLE_RULES, 없으면 기본 규칙)")
+    p.add_argument("--no-rules", action="store_true", help="정산 과목을 묶지 않고 회사 계정 이름 그대로")
+    p.add_argument("--force", action="store_true", help="출력 파일을 고친 흔적이 있어도 덮어씀")
+    p.add_argument("-o", "--out", help="출력 .json (기본: <자료 폴더>/TB_<꼬리>.json)")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
+    p.set_defaults(func=cmd_tb)
 
     p = sub.add_parser("link", help="정산표와 DSD 연결 - 뼈대 DSD 행 그대로 정산표 만들기 · TB 금액 다시 넣기 · 왕복 시험")
     lsub = p.add_subparsers(dest="tcmd", required=True)

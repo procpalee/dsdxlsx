@@ -188,6 +188,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
 | `fill` | `period`, `side`, `counts`, `unfilled` |
 | `build` | `side`, `steps` |
+| `tb` | `erp`(더존·세무사랑), `period`(cur·pri), `accounts`, `no_code`(계정코드를 못 찾아 코드 자리에 `*이름`을 둔 계정), `files`(읽은 파일), `rules`(쓴 규칙 파일, 안 썼으면 `null`). 경고가 있으면 종료코드 1, 자료가 모자라거나 부호합이 안 맞으면 2 |
 | `link make` | `side`, `sheets`, `accounts`, `note_tables`, `to_check`(sheet·label·issue·prior), `unlinked_tb`(DSD 행에 짝이 없는 TB 과목). `to_check`가 있으면 종료코드 1 |
 | `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1 |
 | `link refresh` | `accounts`, `added`(새로 붙인 계정 코드). 새 계정이 있으면 종료코드 1 |
@@ -296,6 +297,8 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `settle` | 정산 과목 - 재무제표에 나오는 이름. DSD 행 이름과 짝짓는 열쇠다. 없으면 `name`. 차감 계정은 `대손충당금(매출채권)`처럼 짝 자산을 괄호에 적는다 |
 | `sub` | 공시용 과목(선택). DSD 행 이름이 이것과 같으면 그 아래 정산 과목을 모두 그 행에 묶는다 |
 | `cur`, `aje`, `pri` | 당기 회사 제시 금액, 수정분개, 전기 금액. 정산표의 당기 = `cur` + `aje` |
+
+`tb` 명령이 만든 파일에는 `group`(대분류), `sub_group`(소분류), `disclosure`(공시 그룹), `erp`, `files`도 들어 있다. `link`는 이 값들을 읽지 않는다.
 
 짝짓기는 전기 금액으로 확인하므로 `pri`가 뼈대 DSD의 전기 칸과 맞아야 한다. 같은 내용을 엑셀이나 CSV 표로 줘도 된다(머리글 `계정과목` 필수, `코드`, `정산 과목`, 금액 열은 `당기`·`전기`나 기준일).
 

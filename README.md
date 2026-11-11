@@ -15,6 +15,7 @@ DART 전자공시 편집기 문서(DSD)를 엑셀로 열어 고치고 다시 DSD
 | 두 DSD에서 화면에 보이는 차이를 HTML 한 장으로 보여 준다 | `diff` |
 | 전기 DSD로 당기 기초 DSD와 정산표를 만든다 | `rollforward` |
 | 직전 분·반기 DSD로 다음 분기 DSD를 만들고, 당기 칸을 조서에서 채운다 | `roll-interim`, `fill`, `build` |
+| 더존(위하고)·세무사랑에서 내려받은 분개장과 재무제표로 TB(계정별 당기·전기 금액과 분류)를 만든다 | `tb` |
 | 뼈대 DSD의 행 그대로 정산표를 만들어 TB와 수식으로 잇고, 그 연결이 DSD까지 이어지는지 왕복으로 확인한다 | `link` |
 | DSD 숫자를 조서(최종분석적검토, 정산표)와 칸마다 맞춰 본다 | `recon` |
 | 한공회 공시사항점검표의 해당 여부와 주석 번호를 채운다 | `disc` |
@@ -157,6 +158,22 @@ uv run --no-editable dsdxlsx build 뼈대.dsd 정산표.xlsx --config _engagemen
 #    레시피는 고객 시트명·행 번호가 들어가므로 건 폴더(_engagement)에만 둔다(저장소에 넣지 않음). 키 설명은 build.py 머리.
 #    재현 시험(2026-10-31, E사 3분기 별도 PA): 건별 덮어쓰기 스크립트를 레시피로 옮겨 build → 당시 빌드 결과와
 #      contents.xml 바이트 동일. 빌드 뒤 원문 패치(자본변동표 소계 줄)를 뼈대로 옮기면 최종본과 바이트 동일.
+
+# 1-1g) ERP 자료 → TB: 더존(위하고) · 세무사랑에서 내려받은 엑셀로 계정별 금액과 분류를 만든다
+uv run --no-editable dsdxlsx tb 자료폴더 [--key 2025 | --key 202509 --date 2025.09.30] [--rules 규칙.toml] [-o TB.json]
+#    필요한 파일: 당기 분개장 · 재무상태표 · 손익계산서, 제조업이면 제조원가명세서. 전기 금액은 당기 재무제표의 전기 열에서 온다.
+#      이름은 <자료>_<회사>_<꼬리> 로 찾는다(재무상태표_회사명_2025.xlsx, 기준연월 자료는 _202509).
+#      이름 규칙 없이 --bs · --pl · --journal · --cost 로 파일을 직접 줄 수도 있다. 옛 엑셀(.xls)도 읽는다.
+#    계정코드 = 그 회사 분개장의 코드(표준 계정표를 쓰지 않는다). 분개장에 거래가 없는 계정은 계정과목_* 목록 · 계정별원장_* 이나
+#      --book {코드: 이름} JSON 에서 찾고, 못 찾으면 코드 자리에 '*이름'을 둔다.
+#    분류 = 재무제표 안 위치: 재무상태표 자산 · 부채 · 자본 > Ⅰ.소분류 > (1)공시 > 계정, 손익계산서 그룹, 제조원가명세서.
+#      차감 계정(감가상각누계액 · 대손충당금)은 바로 위 자산과 짝짓는다 - 감가상각누계액(건물).
+#      이월이익잉여금(마감 전) = 재무상태표 미처분이익잉여금 - 당기순이익. 당기 · 전기 부호합이 0 이 아니면 멈춘다(종료코드 2).
+#    정산 과목 규칙: 회사 계정 이름을 재무제표 과목 이름으로 묶는다(보통예금 → 현금및현금성자산, 외상매출금 → 매출채권).
+#      기본 규칙은 흔한 묶음 몇 가지(src/dsdxlsx/data/settle_rules.toml). 회사나 법인의 과목 체계는 그 파일을 본떠 만들어
+#      --rules 나 환경변수 DSDXLSX_SETTLE_RULES 로 준다. --no-rules 는 회사 계정 이름 그대로.
+#    세무사랑: 출력 양식과 데이터 내보내기 양식의 재무제표 · 분개장 · 전표(전 기간) · 계정별원장을 읽는다.
+#    결과 TB.json(dsdxlsx.tb/1)은 link make --tb 에 그대로 준다. 경고가 있으면 종료코드 1.
 
 # 1-1f) 정산표 만들기: 뼈대 DSD 행 그대로 정산표를 만들어 TB 와 수식으로 잇는다
 uv run --no-editable dsdxlsx link make 뼈대.dsd --tb tb.json [--company 회사명] [--config 설정.json] [-o 정산표.xlsx]
@@ -493,6 +510,7 @@ AUTOSUM(자동합계) 셀이 있는 표를 수정하면 경고가 출력된다 -
 | `OPENDART_API_KEY` | `dart`의 공시 원문 받기, `foot --dart-tie`의 직전 보고서 대사, `roll-interim`의 OpenDART 전기 값 대사(`--no-dart`로 끔). 환경변수가 없으면 저장소 루트나 실행 폴더의 `.env`에서 읽는다. 키는 opendart.fss.or.kr에서 발급한다 |
 | `KICPA_FORMS` | `disc`의 한공회 표준조서 서식 폴더(`--kicpa-dir`를 주면 그쪽이 먼저) |
 | `DSDXLSX_STATE` | 덮어쓰기 보호용 출력 기록(`outputs.json`)을 두는 폴더. 없으면 `%LOCALAPPDATA%\dsdxlsx` |
+| `DSDXLSX_SETTLE_RULES` | `tb`가 쓰는 정산 과목 규칙 TOML 경로. 없으면 패키지의 기본 규칙 |
 | `DSDXLSX_AUTHOR` | 새로 만드는 출력 엑셀(`export`, `check -o` 보고서, `rollforward`·`roll-interim`·`build` 결과, `recon`, `fill`, `disc`)의 파일 속성 '만든 이'. 없으면 excel-theme 스킬의 `AUTHOR`(`EXCEL_AUTHOR`)를 쓰고, 스킬도 없으면 그대로 둔다. 이미 있는 엑셀에 적는 `check`·`refoot`·`annotate-ai`는 만든 이를 바꾸지 않는다 |
 
 ## 개발
