@@ -7,7 +7,8 @@ fill 과 build 는 DSD 당기 칸을 정산표에서 채운다. 그때 어느 �
   DSD 칸 값 = sign × (sources 칸들의 합) × scale   (정수 칸은 반올림, 율은 소수 둘째 자리)
 
 기록 형식(dsdxlsx.map/1)
-  dsd · skeleton · workbook · recipe   파일 이름과 sha256(만든 때의 내용 - 그 뒤 바뀌었는지 볼 때)
+  dsd · skeleton · workbook · recipe   파일 이름 · 경로 · sha256(만든 때의 내용 - 그 뒤 바뀌었는지 볼 때)
+  made_by   기록을 남긴 명령(build | fill)
   cells[]   cell(DSD 칸 ID) · section · table · row · label · col · value(쓴 값) · sources[{sheet, cell}] · scale · sign · how
             sources 가 비면 정산표 칸 없이 계산한 값(위 칸의 합). row_label 은 최종 DSD 에서 그 칸이 놓인 행의 이름.
             state = "overridden" 이면 채운 뒤 레시피나 글 바꾸기가 그 칸을 다시 고쳤다(final = 최종 값) - 출처가 이 기록과 다르다.
@@ -36,7 +37,7 @@ def _file(path: str | None) -> dict | None:
     with open(path, "rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
-    return {"file": os.path.basename(path), "sha256": h.hexdigest()}
+    return {"file": os.path.basename(path), "path": os.path.abspath(path), "sha256": h.hexdigest()}
 
 
 def _same(a, b) -> bool:
@@ -68,7 +69,8 @@ def final_values(dsd: str) -> dict:
     return {k: v["value"] for k, v in dsd_cells(dsd).items()}
 
 
-def build_map(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None = None, side: str = "") -> dict:
+def build_map(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None = None, side: str = "",
+              by: str = "build") -> dict:
     """채움 결과(FillReport)와 최종 DSD 로 출처 기록을 만든다."""
     doc_cells = dsd_cells(dsd)
     final = {k: v["value"] for k, v in doc_cells.items()}
@@ -88,15 +90,16 @@ def build_map(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None
             e["state"], e["final"] = "overridden", final[x.cell]
             n_over += 1
         cells.append(e)
-    return {"schema": SCHEMA, "side": side, "dsd": _file(dsd), "skeleton": _file(skeleton), "workbook": _file(workbook),
+    return {"schema": SCHEMA, "side": side, "made_by": by, "dsd": _file(dsd), "skeleton": _file(skeleton), "workbook": _file(workbook),
             "recipe": _file(recipe), "period": rep.period,
             "counts": {"cells": len(cells), "overridden": n_over, "missing": n_miss, "unfilled": rep.count("못 채움")},
             "cells": cells}
 
 
-def save(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None = None, side: str = "") -> tuple[str, dict]:
+def save(rep, *, dsd: str, skeleton: str, workbook: str, recipe: str | None = None, side: str = "",
+         by: str = "build") -> tuple[str, dict]:
     """출처 기록을 DSD 옆 _build 폴더에 쓴다. 반환: (경로, counts)."""
-    m = build_map(rep, dsd=dsd, skeleton=skeleton, workbook=workbook, recipe=recipe, side=side)
+    m = build_map(rep, dsd=dsd, skeleton=skeleton, workbook=workbook, recipe=recipe, side=side, by=by)
     path = path_of(dsd)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:

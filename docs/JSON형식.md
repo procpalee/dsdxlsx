@@ -192,6 +192,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `link make` | `side`, `sheets`, `accounts`, `note_tables`, `to_check`(sheet·label·issue·prior), `unlinked_tb`(DSD 행에 짝이 없는 TB 과목), TB가 표일 때 `tb_columns`(읽은 당기·전기 열의 머리글). `to_check`가 있으면 종료코드 1 |
 | `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1 |
 | `link refresh` | `accounts`, `added`(새로 붙인 계정 코드). 새 계정이 있으면 종료코드 1 |
+| `status` | `in_sync`, `files`(dsd·skeleton·workbook·recipe마다 `file`, `state`: same·changed·missing, 기록이 없으면 `null`), `dsd_changes`(DSD가 바뀌었을 때 `link back`의 종류별 칸 수), `unmapped`(출처 기록에 없는 칸의 변경 수), `workbook_changes`(cells: 값이 달라진 출처 칸, no_values: 계산값이 없는 수식 칸), `next`(다음에 할 일), `made_by`. 맞으면 종료코드 0, 아니면 1 |
 | `link back` | `changes`(아래), `counts`(종류별 수), `unchanged`, `applied`(정산표에 쓴 칸 수), `backup`(쓰기 전 사본), `unmapped`(출처 기록에 없는 칸의 변경: cell·label·old·new), `map`. 사람이 볼 것이 남으면 종료코드 1 |
 | `rollforward`, `roll-interim` | `counts`(자동확정·확인필요·미처리), `painted`, `todo`. `roll-interim`은 `period`, `dart`도 |
 | `renumber` | `notes`, `mapping`, `mentions`, `headings`, `ref_cells` |
@@ -284,9 +285,10 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 {
   "schema": "dsdxlsx.map/1",
   "side": "별도",
-  "dsd": {"file": "보고서.dsd", "sha256": "…"},
-  "skeleton": {"file": "뼈대.dsd", "sha256": "…"},
-  "workbook": {"file": "정산표.xlsx", "sha256": "…"},
+  "made_by": "build",
+  "dsd": {"file": "보고서.dsd", "path": "…", "sha256": "…"},
+  "skeleton": {"file": "뼈대.dsd", "path": "…", "sha256": "…"},
+  "workbook": {"file": "정산표.xlsx", "path": "…", "sha256": "…"},
   "recipe": null,
   "counts": {"cells": 320, "overridden": 0, "missing": 0, "unfilled": 12},
   "cells": [
@@ -305,7 +307,8 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `scale`, `sign` | 정산표 값에 곱한 배율(원과 천원, 율은 100)과 부호(차감 계정을 양수로 적는 정산표는 -1) |
 | `row_label` | 최종 DSD에서 그 칸이 놓인 행의 이름. 나중에 칸 번호가 밀렸는지 볼 때 맞춰 본다 |
 | `state` | `overridden`이면 채운 뒤 레시피나 글 바꾸기가 그 칸을 다시 고쳤다(`final`이 최종 값). `missing`이면 최종 DSD에 그 칸이 없다. 없으면 기록대로다 |
-| `dsd`, `skeleton`, `workbook`, `recipe` | 만든 때의 파일 이름과 sha256. 그 뒤 파일이 바뀌었는지 볼 때 쓴다 |
+| `dsd`, `skeleton`, `workbook`, `recipe` | 만든 때의 파일 이름(`file`), 경로(`path`), 내용(`sha256`). `status`가 그 뒤 파일이 바뀌었는지 볼 때 쓴다 |
+| `made_by` | 기록을 남긴 명령(`build`나 `fill`) |
 
 ### link back 의 반영 목록
 

@@ -26,7 +26,7 @@ INPUTS = {
     "rollforward": {"dsd": "dsd"},
     "roll-interim": {"dsd": "dsd", "prior_same": "dsd", "prior_annual": "dsd"},
     "renumber": {"dsd": "dsd"}, "calibrate": {"dsd": "dsd"}, "ties": {"xlsx": "xlsx"},
-    "link": {"dsd": "dsd", "workbook": "xlsx"},
+    "link": {"dsd": "dsd", "workbook": "xlsx"}, "status": {"dsd": "dsd", "workbook": "xlsx", "skeleton": "dsd"},
 }
 # 결과 봉투를 스스로 내는 명령(나머지는 main 이 감싼다)
 SELF_EMIT = ("apply", "dart")
@@ -1381,6 +1381,36 @@ def cmd_link_test(args) -> int:
     return 1 if bad else 0
 
 
+def cmd_status(args) -> int:
+    """build · fill 뒤에 DSD · 정산표 · 뼈대 가운데 무엇이 바뀌었고 다음에 무엇을 돌릴지(아무것도 쓰지 않는다)."""
+    from . import srcmap
+    from . import status as ST
+
+    src = args.map or args.dsd
+    m = srcmap.load(src)
+    if m is None:
+        raise guard.InputError("칸별 출처 기록을 찾을 수 없습니다: %s - build · fill 로 만든 DSD 가 아니거나 _build 폴더가 없습니다"
+                               % (src if src.lower().endswith(".json") else srcmap.path_of(src)))
+    res = ST.check(args.dsd, m, skeleton=args.skeleton, workbook=args.workbook, recipe=args.recipe)
+    files = {k: {"file": v["file"], "state": v["state"]} for k, v in res["files"].items()}
+    _note(args, files=files, made_by=res["made_by"], in_sync=res["in_sync"], dsd_changes=res["dsd_changes"],
+          unmapped=res["unmapped"], workbook_changes=res["workbook_changes"], next=res["next"])
+    for key, name in ST.ROLES:
+        f = res["files"][key]
+        if f["state"] is not None:
+            print(f"  {name:<8} {ST.STATE[f['state']]:<10} {f['file'] or ''}")
+    if res["dsd_changes"]:
+        print("  DSD 에서 바뀐 칸: " + ", ".join(f"{k} {v}" for k, v in res["dsd_changes"].items()))
+    if res["unmapped"]:
+        print(f"  출처 기록에 없는 칸의 변경: {res['unmapped']}개")
+    wc = res["workbook_changes"]
+    if wc:
+        print(f"  정산표에서 값이 달라진 출처 칸: {wc['cells']}개" + (f" (계산값이 없는 수식 칸 {wc['no_values']}개)" if wc["no_values"] else ""))
+    for line in res["next"]:
+        print("→ " + line)
+    return 0 if res["in_sync"] else 1
+
+
 def cmd_link_back(args) -> int:
     """DSD 에서 고친 숫자를 정산표로 - 칸별 출처 기록으로 정산표 칸을 찾아 반영 목록을 내고, --apply 면 값 칸에 쓴다."""
     from . import build as B
@@ -1453,7 +1483,7 @@ def cmd_fill(args) -> int:
     except PermissionError:
         report = "(결과 엑셀이 열려 있어 저장 못 함)"
     from . import srcmap
-    map_path, map_counts = srcmap.save(rep, dsd=out, skeleton=args.file, workbook=args.workpaper, side=side)
+    map_path, map_counts = srcmap.save(rep, dsd=out, skeleton=args.file, workbook=args.workpaper, side=side, by="fill")
     unfilled = [x for x in rep.items if x.verdict == "못 채움"]
     _note(args, outputs=[out] + ([report] if os.path.exists(report) else []) + [map_path], warnings=rep.warnings,
           period=rep.period, side=side, counts={"채움": rep.count("채움"), "못 채움": len(unfilled)}, map=map_path,
@@ -1547,7 +1577,7 @@ HELP_GROUPS = """\
                 recheck  calibrate  ties
   다음 기간     rollforward(연차)  roll-interim(분·반기)  renumber(주석 번호)
   조서와 맞추기 recon(대사)  fill(당기 칸 채움)  build(정산표로 다시 만들기)  disc(8400 점검표)
-                tb(더존 · 세무사랑 자료 → TB)  link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험 · DSD 에서 고친 값 되돌리기)
+                status(build 뒤 무엇이 바뀌었나)  tb(더존 · 세무사랑 자료 → TB)  link(DSD 행 그대로 정산표 만들기 · 금액 다시 넣기 · 왕복 시험 · DSD 에서 고친 값 되돌리기)
   두 판 비교    diff(HTML 보고서)  verify(구조 비교)
   엑셀 없이     inspect(읽기·목차·찾기)  apply(JSON 편집)  annotate-ai(AI 검토 기록)
 
@@ -1934,6 +1964,15 @@ def main(argv=None) -> int:
     p.add_argument("-o", "--out", help="출력 .json (기본: <자료 폴더>/TB_<꼬리>.json)")
     p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
     p.set_defaults(func=cmd_tb)
+
+    p = sub.add_parser("status", help="build · fill 뒤에 DSD · 정산표 · 뼈대 가운데 무엇이 바뀌었고 다음에 무엇을 돌릴지")
+    p.add_argument("dsd", help="build · fill 로 만든 출력 .dsd")
+    p.add_argument("--workbook", help="정산표 .xlsx (기본: 출처 기록에 적힌 경로)")
+    p.add_argument("--skeleton", help="뼈대 .dsd (기본: 출처 기록에 적힌 경로)")
+    p.add_argument("--recipe", help="레시피 JSON (기본: 출처 기록에 적힌 경로)")
+    p.add_argument("--map", help="칸별 출처 기록 - map.json 이나 그 기록을 남긴 출력 DSD (기본: DSD 옆 _build 폴더)")
+    p.add_argument("--json", action="store_true", help="결과를 JSON 봉투로(표준출력, 종료코드 0/1/2/3)")
+    p.set_defaults(func=cmd_status)
 
     p = sub.add_parser("link", help="정산표와 DSD 연결 - 뼈대 DSD 행 그대로 정산표 만들기 · TB 금액 다시 넣기 · 왕복 시험 · 되돌리기")
     lsub = p.add_subparsers(dest="tcmd", required=True)

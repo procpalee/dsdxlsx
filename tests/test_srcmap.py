@@ -44,7 +44,8 @@ def test_map_records_source_cell_scale_and_sign(tmp_path):
     total = _by_label(m, "합계", "당반기말")
     assert total["sources"] == [] and total["scale"] is None and "위 칸 합" in total["how"]   # 정산표 칸 없이 계산한 값
     sha = hashlib.sha256(open(wp, "rb").read()).hexdigest()
-    assert m["workbook"] == {"file": os.path.basename(wp), "sha256": sha} and m["recipe"] is None
+    assert m["workbook"] == {"file": os.path.basename(wp), "path": os.path.abspath(wp), "sha256": sha}
+    assert m["recipe"] is None and m["made_by"] == "build"
     assert m["dsd"]["sha256"] == hashlib.sha256(open(out, "rb").read()).hexdigest()
 
 
