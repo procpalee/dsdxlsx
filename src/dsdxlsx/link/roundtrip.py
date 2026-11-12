@@ -88,6 +88,7 @@ def compare(built: dict, skeleton: dict) -> dict:
                 if not pair:
                     continue
                 x_t, y_t, cols = pair
+                heads = {c["col"]: c.get("header") for c in x_t["columns"]}
                 for r, r0 in zip(x_t["rows"], y_t["rows"]):
                     if r.get("head"):
                         continue
@@ -97,7 +98,9 @@ def compare(built: dict, skeleton: dict) -> dict:
                         if y is None:
                             continue
                         x = v.get(c, {}).get("value")
-                        item = {"section": s["section"], "label": tidy(r["label"]), "built": x, "expected": y}
+                        item = {"section": s["section"], "label": tidy(r["label"]), "built": x, "expected": y,
+                                "column": tidy(heads.get(c)), "split": x_t is not y_t and cols[0][0] == cols[0][1],
+                                "cell": v.get(c, {}).get("id")}
                         if x is None:
                             res["note_blank"].append(item)
                         elif x == y:
@@ -112,9 +115,12 @@ def compare(built: dict, skeleton: dict) -> dict:
             continue
         cc = [c["col"] for c in t["columns"] if c.get("period") == "당기"]
         pc = [c["col"] for c in t["columns"] if c.get("period") == "전기"]
+        seen: dict[str, int] = {}
         for r, r0 in zip(t["rows"], t0["rows"]):
             if r.get("head"):
                 continue
+            # 줄 이름은 뼈대 것으로 - 결과 DSD 는 fill 이 '영업이익' → '영업이익(손실)' 처럼 고쳐 쓸 수 있다
+            nth = seen[squeeze(r0["label"])] = seen.get(squeeze(r0["label"]), -1) + 1
             if s["section"] in ("손익계산서", "포괄손익계산서") and key_of(r["label"]).startswith(("기초", "당기", "기말")):
                 continue                      # 재고 구성 줄(기초 · 매입 · 기말)은 재무상태표에서 오는 수식
             if s["section"] == "현금흐름표" and re.search("기초", squeeze(r["label"])):
@@ -126,7 +132,8 @@ def compare(built: dict, skeleton: dict) -> dict:
                 if y is None and ty != "-":
                     continue
                 y = y or 0
-                item = {"section": s["section"], "label": tidy(r["label"]), "built": x, "expected": y}
+                item = {"section": s["section"], "label": tidy(r0["label"]), "built": x, "expected": y,
+                        "cell": v.get(c, {}).get("id"), "nth": nth}
                 if x is None and tx != "-":
                     res["blank"].append(item)
                 elif (x or 0) == y:
@@ -134,6 +141,81 @@ def compare(built: dict, skeleton: dict) -> dict:
                 else:
                     res["diff"].append(item)
     return res
+
+
+FS_SHEET = {"재무상태표": "BS", "손익계산서": "IS", "포괄손익계산서": "IS", "현금흐름표": "CF"}
+CAUSES = ("연결점검 항목", "위 줄을 따라 바뀜", "주석 - 당기 표와 전기 표가 따로", "채우지 못함", "확인 필요")
+
+
+def _checks(wb) -> set:
+    """'연결점검' 시트의 (시트, 과목 열쇠) - 정산표를 만들 때 이미 알린 줄."""
+    if "연결점검" not in wb.sheetnames:
+        return set()
+    ws = wb["연결점검"]
+    return {(str(ws.cell(r, 2).value), key_of(ws.cell(r, 3).value)) for r in range(HDR_ROW + 1, ws.max_row + 1)
+            if ws.cell(r, 2).value not in (None, "-", "TB")}
+
+
+def _fs_kind(wb, section: str, label: str, nth: int) -> str:
+    """재무제표 시트에서 그 줄의 당기 칸 - 'tb'(TB 를 끌어옴) · 'calc'(다른 칸에서 계산) · 'input' · ''(못 찾음)."""
+    name = FS_SHEET.get(section)
+    if name not in wb.sheetnames:
+        return ""
+    ws = wb[name]
+    hits = [r for r in range(HDR_ROW + 1, ws.max_row + 1) if squeeze(ws.cell(r, 2).value) == squeeze(label)]
+    if not hits:                                  # 번호 · 주석 표시가 다르게 적힌 줄('Ⅲ. 영업이익(손실)' ↔ '영업이익(손실)')
+        hits = [r for r in range(HDR_ROW + 1, ws.max_row + 1) if key_of(ws.cell(r, 2).value) == key_of(label)]
+    if nth >= len(hits):
+        return ""
+    v = ws.cell(hits[nth], 3).value
+    if isinstance(v, str) and v.startswith("="):
+        return "tb" if "SUMIF(TB!" in v.replace(" ", "") else "calc"
+    return "input"
+
+
+def explain(res: dict, workbook: str, fill_items=()) -> dict:
+    """어긋난 칸마다 원인(cause)과, 채우기가 못 채웠으면 그 이유(why)를 붙이고 원인별 개수를 res["causes"] 에 둔다.
+
+    재무제표: 정산표를 만들 때 '연결점검'에 올린 과목이면 '연결점검 항목', 그 밖의 어긋난 과목 줄은 '확인 필요'
+    (못 채운 칸이면 '채우지 못함'). 다른 칸에서 계산하는 줄(합계 · 이어 받는 줄)은 어긋난 과목 줄이 있으면 '위 줄을
+    따라 바뀜', 과목 줄이 모두 맞는데 계산 줄만 어긋나면 수식이 끊긴 것이라 '확인 필요'.
+    주석: 당기 표와 전기 표가 따로 있는 표(변동표 등)는 '주석 - 당기 표와 전기 표가 따로' 로 따로 세고, 채우기가 못 채운
+    칸은 '채우지 못함'(이유 = fill 의 기록), 그 밖은 '확인 필요'."""
+    wb = load_workbook(workbook, read_only=False)
+    try:
+        checks = _checks(wb)
+        why = {it.cell: it.how for it in fill_items if getattr(it, "cell", "") and it.verdict != "채움"}
+        fs = res["diff"] + res["blank"]
+        for x in fs:
+            sheet = FS_SHEET.get(x["section"], "")
+            x["cause"] = "연결점검 항목" if (sheet, key_of(x["label"])) in checks else ""
+        kinds = {id(x): _fs_kind(wb, x["section"], x["label"], x.get("nth", 0)) for x in fs}
+        for x in fs:                              # 과목 줄(TB · 입력)부터
+            if x["cause"] or kinds[id(x)] == "calc":
+                continue
+            if x.get("cell") in why:
+                x["cause"], x["why"] = "채우지 못함", why[x["cell"]]
+            else:
+                x["cause"] = "확인 필요"
+        leaf_bad = any(x["cause"] for x in fs)
+        for x in fs:                              # 계산 줄: 어긋난 과목 줄이 있으면 그것을 따라 바뀐 것, 없으면 수식이 끊긴 것
+            if x["cause"]:
+                continue
+            x["cause"] = "위 줄을 따라 바뀜" if leaf_bad else "확인 필요"
+        for x in res["note_diff"] + res["note_blank"]:
+            if x.get("split"):
+                x["cause"] = "주석 - 당기 표와 전기 표가 따로"
+            elif x.get("cell") in why:
+                x["cause"], x["why"] = "채우지 못함", why[x["cell"]]
+            else:
+                x["cause"] = "확인 필요"
+        counts = {k: 0 for k in CAUSES}
+        for x in fs + res["note_diff"] + res["note_blank"]:
+            counts[x["cause"]] += 1
+        res["causes"] = {k: v for k, v in counts.items() if v}
+        return res
+    finally:
+        wb.close()
 
 
 def run(skeleton: str, workbook: str, *, conf: dict | None = None, recipe: dict | None = None, notes: bool = False,
@@ -168,11 +250,12 @@ def run(skeleton: str, workbook: str, *, conf: dict | None = None, recipe: dict 
                       workdir=os.path.join(td, "wd"))
         dict_of = lambda p: docview.doc_dict(parse_contents(read_dsd(p).contents), source=p)  # noqa: E731
         res = compare(dict_of(out), dict_of(skeleton))
-        res["steps"] = list(rep.steps)
-        res["warnings"] = list(rep.warnings)
         if not notes:
             res["note_same"], res["note_diff"], res["note_blank"] = 0, [], []
-        elif not n_notes:
+        explain(res, workbook, getattr(rep.fill, "items", ()) or ())
+        res["steps"] = list(rep.steps)
+        res["warnings"] = list(rep.warnings)
+        if notes and not n_notes:
             res["warnings"].append("정산표에 주석 칸 짝 기록이 없어 주석의 당기 칸을 채우지 못했습니다 - 주석 결과는 참고만")
         return res
     finally:

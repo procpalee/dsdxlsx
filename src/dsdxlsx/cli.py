@@ -1397,12 +1397,16 @@ def cmd_link_test(args) -> int:
         guard.remember(args.out)
         outputs.append(args.out)
     _note(args, outputs=outputs, warnings=res["warnings"], side=side, same=res["same"], diff=res["diff"], blank=res["blank"],
-          note_same=res["note_same"], note_diff=res["note_diff"], note_blank=res["note_blank"], steps=res["steps"])
+          note_same=res["note_same"], note_diff=res["note_diff"], note_blank=res["note_blank"], causes=res.get("causes", {}),
+          steps=res["steps"])
     print(f"왕복 시험({side}) - 재무제표 같음 {res['same']}칸 · 다름 {len(res['diff'])}칸 · 빈칸 {len(res['blank'])}칸"
           + (f" / 주석 같음 {res['note_same']}칸 · 다름 {len(res['note_diff'])}칸 · 빈칸 {len(res['note_blank'])}칸" if args.notes else ""))
+    if res.get("causes"):
+        print("  원인: " + " · ".join(f"{k} {v}칸" for k, v in res["causes"].items()))
     for kind, items in (("다름", res["diff"]), ("빈칸", res["blank"]), ("주석 다름", res["note_diff"]), ("주석 빈칸", res["note_blank"])):
         for x in items[:40]:
-            print(f"  [{kind}] {x['section']} · {x['label']}: 결과 {x['built']} / 전기 {x['expected']}")
+            why = x.get("cause", "") + (f" - {x['why']}" if x.get("why") else "")
+            print(f"  [{kind}] {x['section']} · {x['label']}: 결과 {x['built']} / 전기 {x['expected']}" + (f" ({why})" if why else ""))
     if not bad:
         print("  정산표의 당기 칸이 DSD 당기 칸까지 모두 이어집니다.")
     if args.out:

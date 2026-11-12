@@ -419,7 +419,7 @@ def test_test_writes_result_workbook(tmp_path, capsys):
     ws = openpyxl.load_workbook(rep)["왕복시험"]
     assert [ws.cell(6, c).value for c in range(2, 6)] == ["재무제표", 49, 0, 0]
     assert [ws.cell(7, c).value for c in range(2, 6)] == ["주석", 3, 0, 0]
-    assert ws.cell(10, 3).value == "해당 없음"
+    assert ws.cell(10, 2).value == "해당 없음"
 
     wb = openpyxl.load_workbook(out)                                       # 연결을 하나 끊으면 어긋난 칸이 목록에 나온다
     tb = wb["TB"]
@@ -429,6 +429,64 @@ def test_test_writes_result_workbook(tmp_path, capsys):
     assert main(["link", "test", skel, out, "-o", str(rep), "--json"]) == 1
     capsys.readouterr()
     ws = openpyxl.load_workbook(rep)["왕복시험"]
-    listed = {ws.cell(r, 5).value: ws.cell(r, 4).value for r in range(9, ws.max_row + 1) if ws.cell(r, 5).value}
+    listed = {ws.cell(r, 5).value: ws.cell(r, 4).value for r in range(9, ws.max_row + 1) if ws.cell(r, 4).value in ("다름", "빈칸")}
     assert listed.get("매출채권") in ("다름", "빈칸") and "자산총계" in listed
     assert ws.cell(7, 2).value is None                                    # --notes 없이는 주석 줄이 없다
+    assert ws.cell(8, 2).value == "원인" and ws.cell(9, 2).value == "확인 필요"   # 연결점검에 없던 끊김 = 확인 필요
+    assert ws.cell(10, 2).value == "위 줄을 따라 바뀜"                     # 그 줄을 더하는 합계
+
+
+def test_sum_formula_broken_alone_needs_check(tmp_path):
+    """과목 줄이 모두 맞는데 합계 줄만 어긋나면 합계 수식이 끊긴 것 - '확인 필요'."""
+    skel, out, _ = _made(tmp_path)
+    wb = openpyxl.load_workbook(out)
+    ws = wb["BS"]
+    r = next(r for r in range(6, ws.max_row + 1) if ws.cell(r, 2).value == "자산총계")
+    ws.cell(r, 3).value = ws.cell(r, 3).value + "+1"
+    wb.save(out)
+    res = roundtrip.run(skel, out)
+    assert [(x["label"], x["cause"]) for x in res["diff"] + res["blank"]] == [("자산총계", "확인 필요")]
+
+
+def test_test_sorts_out_known_check_rows(tmp_path, capsys):
+    """TB 전기 금액이 전기 DSD 와 다른 과목은 정산표를 만들 때 '연결점검'에 올라간다 - 왕복 시험은 그 줄을
+    '연결점검 항목', 그 줄을 더하는 합계는 '위 줄을 따라 바뀜'으로 나누고, 끊긴 연결만 '확인 필요'로 남긴다."""
+    rows = [(c, n, s, (pri + 50 if n == "외상매출금" else pri), cur) for c, n, s, pri, cur in LF.TB]
+    skel, out, summary = _made(tmp_path, rows)
+    assert any(x["label"] == "매출채권" for x in summary["to_check"])
+    res = roundtrip.run(skel, out)
+    cause = {x["label"]: x["cause"] for x in res["diff"] + res["blank"]}
+    assert cause["매출채권"] == "연결점검 항목"
+    assert cause["자산총계"] == "위 줄을 따라 바뀜" and cause["Ⅰ.유동자산"] == "위 줄을 따라 바뀜"
+    assert "확인 필요" not in res["causes"]
+    rep = tmp_path / "왕복시험.xlsx"
+    assert main(["link", "test", skel, out, "-o", str(rep), "--json"]) == 1
+    env = json.loads(capsys.readouterr().out)
+    assert env["causes"] == res["causes"]
+    ws = openpyxl.load_workbook(rep)["왕복시험"]
+    assert [ws.cell(r, 2).value for r in (9, 10)] == ["연결점검 항목", "위 줄을 따라 바뀜"]
+    first = next(r for r in range(11, ws.max_row + 1) if ws.cell(r, 2).value == "원인" and ws.cell(r, 3).value == "위치")
+    assert ws.cell(first + 1, 2).value == "연결점검 항목" and ws.cell(first + 1, 5).value == "매출채권"
+
+
+def test_note_headers_keep_group_name(tmp_path):
+    """두 줄 머리글('당기말' 아래 '주식수 · 지분율')은 정산표 주석 시트에 열마다 묶음 이름까지 적는다 -
+    둘째 열에 '당기말'이 빠지면 DSD 를 채울 때 그 열의 기간을 몰라 옆 열 값이 들어간다."""
+    head1 = ["||ROWSPAN=2||주주명", "||COLSPAN=2||당기말", "||COLSPAN=2||전기말"]
+    head2 = ["주식수", "지분율(%)", "주식수", "지분율(%)"]
+    body = [["갑", "", "", "6,000", "60.00"], ["을", "", "", "4,000", "40.00"], ["합  계", "", "", "10,000", "100.00"]]
+    crlf = "\r\n"
+    extra = (crlf + p("5. 주주 현황") + crlf + crlf + table([head1, head2], body, ncols=5)).encode("utf-8")
+    extra = extra.replace(b'<TD ALIGN="LEFT"/>', b'<TD ALIGN="RIGHT"></TD>')
+    contents = LF.skeleton_contents().replace(b"\r\n</DOCUMENT>", extra + b"\r\n</DOCUMENT>")
+    skel = tmp_path / "skel.dsd"
+    write_dsd(skel, contents)
+    tb, info = tbsrc.load(LF.write_tb(tmp_path / "tb.json"))
+    wb, _ = core.make(_doc(str(skel)), tb, info)
+    ws = wb["주석"]
+    heads = [[ws.cell(r, c).value for c in range(2, 7)] for r in range(1, ws.max_row + 1) if ws.cell(r, 2).value == "주주명"]
+    assert heads == [["주주명", "당기말 주식수", "당기말 지분율(%)", "전기말 주식수", "전기말 지분율(%)"]]
+    out = str(tmp_path / "정산표.xlsx")
+    wb.save(out)
+    res = roundtrip.run(str(skel), out, notes=True)
+    assert [x for x in res["note_diff"] + res["note_blank"] if x["section"] == "5"] == []

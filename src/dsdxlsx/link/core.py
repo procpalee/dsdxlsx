@@ -644,6 +644,11 @@ def notes_sheet(wb, meta, sections):
             headers = [str(x) if x is not None else "" for x in (head[0] if head else [None] * b["ncols"])]
             for extra in head[1:]:
                 headers = [("%s %s" % (a, x)).strip() if x else a for a, x in zip(headers, extra)]
+            # 여러 줄 머리글은 열마다 위 묶음까지 붙인다('당기말' 아래 '소유주식수 · 지분율' → 두 열 모두 '당기말 …').
+            # 합친 칸의 둘째 열부터 묶음 이름이 빠지면 fill 이 그 열의 기간을 몰라 옆 열 값을 넣는다.
+            full = {c["col"]: " ".join(c["header"].split("/")) for c in b["columns"] if c.get("header")}
+            if len(head) > 1:
+                headers = [full.get(i) or h for i, h in enumerate(headers)]
             body = [[num_space(x) if isinstance(x, str) else x for x in row] for row in body]
             write_table(ws, headers, body or [[None] * b["ncols"]], header_row=r,
                         number_cols={i: ACCT for i in range(1, b["ncols"])})
