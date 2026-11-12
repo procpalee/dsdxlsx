@@ -56,6 +56,7 @@ dsdxlsx diff 보고서.dsd 보고서_수정.dsd                # 7. 사람에게
 | 더존·세무사랑 자료 → TB | `tb <자료 폴더>` → `TB_<꼬리>.json` (`warnings`, `no_code` 확인) |
 | 뼈대 DSD 행 그대로 정산표 만들기, 연결 확인 | `link make` → `link test`(왕복 시험), TB 가 바뀌면 `link refresh` |
 | 정산표와 DSD 중 무엇이 바뀌었나 | `status <출력 DSD> --json` 의 `next` 를 따른다 |
+| 0.6.1 이하로 만든 정산표의 두 줄 머리글 주석 표 고치기 | `link fix-headers <뼈대 DSD> <정산표> --json` 으로 고칠 칸을 보고 `--apply`(머리글 칸만 바뀜, 쓰기 전 사본). `link test` 의 원인이 `주석 머리글에 묶음 이름이 빠짐` 이면 이것 |
 | DSD 에서 고친 숫자를 정산표로 | `link back <고친 DSD> <정산표> --json` 으로 목록을 보고, 값 칸만 `--apply` |
 | DART 공시 → DSD | `dart` (OpenDART 키 필요) |
 | 주석 번호 정리 | `renumber` |

@@ -200,11 +200,8 @@ def _one(wb, e: dict, item: dict, new: float) -> None:
         item["kind"] = "value"
 
 
-def apply(workbook: str, changes: list) -> tuple[int, str | None]:
-    """value 종류의 제안 값을 정산표에 쓴다. 쓰기 전에 정산표를 _build 폴더에 복사해 둔다. 반환: (쓴 칸 수, 백업 경로)."""
-    todo = [x for x in changes if x["kind"] in WRITE]
-    if not todo:
-        return 0, None
+def backup_copy(workbook: str) -> str:
+    """정산표에 쓰기 전 사본 - 정산표 옆 _build/<이름>_<시각>.xlsx. 반환: 사본 경로."""
     d = os.path.join(os.path.dirname(os.path.abspath(workbook)), "_build")
     os.makedirs(d, exist_ok=True)
     stem, ext = os.path.splitext(os.path.basename(workbook))
@@ -214,6 +211,15 @@ def apply(workbook: str, changes: list) -> tuple[int, str | None]:
         k += 1
         backup = os.path.join(d, "%s_%s_%d%s" % (stem, time.strftime("%Y%m%d_%H%M%S"), k, ext))
     shutil.copy2(workbook, backup)
+    return backup
+
+
+def apply(workbook: str, changes: list) -> tuple[int, str | None]:
+    """value 종류의 제안 값을 정산표에 쓴다. 쓰기 전에 정산표를 _build 폴더에 복사해 둔다. 반환: (쓴 칸 수, 백업 경로)."""
+    todo = [x for x in changes if x["kind"] in WRITE]
+    if not todo:
+        return 0, None
+    backup = backup_copy(workbook)
     wb = load_workbook(workbook)
     for x in todo:
         m = _REF.match(x["ref"])

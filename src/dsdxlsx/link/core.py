@@ -586,6 +586,15 @@ CAPTION_RE = re.compile(r"(?:^|[.\-:\s])(당\s*기\s*말?|전\s*기\s*말?)\s*[:
 UNIT_RE = re.compile(r"\(?\s*단위\s*[:：]\s*[^)\s]+\s*\)?")
 
 
+PERIOD_RE = re.compile(r"[당전]\s*(분|반)?\s*기|\d{4}\s*[.\-년]|제\s*\d+\s*기")
+
+
+def needs_group(header: str, full: str) -> bool:
+    """주석 머리글 칸에 위 묶음 이름을 붙여야 하나 - 칸 글이 전체 머리글(묶음 포함)과 다르고 칸 글에 기간이 없을 때.
+    칸 글에 기간이 있으면('금액' 아래 '당기') 그대로 둔다 - 묶음을 붙이면 fill 이 그 열을 못 고른다."""
+    return squeeze(header) != squeeze(full) and not PERIOD_RE.search(header or "")
+
+
 def notes_sheet(wb, meta, sections):
     ws = wb.create_sheet("주석")
     write_header(ws, meta, "주석")
@@ -644,11 +653,12 @@ def notes_sheet(wb, meta, sections):
             headers = [str(x) if x is not None else "" for x in (head[0] if head else [None] * b["ncols"])]
             for extra in head[1:]:
                 headers = [("%s %s" % (a, x)).strip() if x else a for a, x in zip(headers, extra)]
-            # 여러 줄 머리글은 열마다 위 묶음까지 붙인다('당기말' 아래 '소유주식수 · 지분율' → 두 열 모두 '당기말 …').
-            # 합친 칸의 둘째 열부터 묶음 이름이 빠지면 fill 이 그 열의 기간을 몰라 옆 열 값을 넣는다.
-            full = {c["col"]: " ".join(c["header"].split("/")) for c in b["columns"] if c.get("header")}
+            # 여러 줄 머리글은 열마다 위 묶음까지 붙인다('당기말' 아래 '소유주식수 · 지분율' → 두 열 모두 '당기말 …') -
+            # 합친 칸의 둘째 열부터 묶음 이름이 빠지면 fill 이 그 열의 기간을 몰라 옆 열 값을 넣는다. 칸 글에 기간이
+            # 이미 있으면('금액' 아래 '당기 · 전기') 그대로 둔다 - 묶음을 붙이면 오히려 열을 못 고른다.
             if len(head) > 1:
-                headers = [full.get(i) or h for i, h in enumerate(headers)]
+                full = {c["col"]: " ".join(c["header"].split("/")) for c in b["columns"] if c.get("header")}
+                headers = [full[i] if i in full and needs_group(h, full[i]) else h for i, h in enumerate(headers)]
             body = [[num_space(x) if isinstance(x, str) else x for x in row] for row in body]
             write_table(ws, headers, body or [[None] * b["ncols"]], header_row=r,
                         number_cols={i: ACCT for i in range(1, b["ncols"])})

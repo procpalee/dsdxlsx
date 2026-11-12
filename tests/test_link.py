@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import json
+import os
 
 import openpyxl
 import pytest
@@ -490,3 +491,67 @@ def test_note_headers_keep_group_name(tmp_path):
     wb.save(out)
     res = roundtrip.run(str(skel), out, notes=True)
     assert [x for x in res["note_diff"] + res["note_blank"] if x["section"] == "5"] == []
+
+
+def _two_row_header_case(tmp_path):
+    head1 = ["||ROWSPAN=2||주주명", "||COLSPAN=2||당기말", "||COLSPAN=2||전기말"]
+    head2 = ["주식수", "지분율(%)", "주식수", "지분율(%)"]
+    body = [["갑", "", "", "6,000", "60.00"], ["을", "", "", "4,000", "40.00"], ["합  계", "", "", "10,000", "100.00"]]
+    crlf = "\r\n"
+    extra = (crlf + p("5. 주주 현황") + crlf + crlf + table([head1, head2], body, ncols=5)).encode("utf-8")
+    extra = extra.replace(b'<TD ALIGN="LEFT"/>', b'<TD ALIGN="RIGHT"></TD>')
+    skel = tmp_path / "skel.dsd"
+    write_dsd(skel, LF.skeleton_contents().replace(b"\r\n</DOCUMENT>", extra + b"\r\n</DOCUMENT>"))
+    tb, info = tbsrc.load(LF.write_tb(tmp_path / "tb.json"))
+    wb, _ = core.make(_doc(str(skel)), tb, info)
+    ws = wb["주석"]
+    r = next(r for r in range(1, ws.max_row + 1) if ws.cell(r, 2).value == "주주명")
+    ws.cell(r, 4).value = "지분율(%)"                                    # 0.6.1 이하가 만든 모양
+    ws.cell(r, 6).value = "지분율(%)"
+    out = tmp_path / "정산표.xlsx"
+    wb.save(out)
+    return str(skel), str(out), r
+
+
+def test_fix_headers_lists_then_applies(tmp_path, capsys):
+    skel, out, r = _two_row_header_case(tmp_path)
+    res = roundtrip.run(skel, out, notes=True)                           # 예전 모양 - 왕복 시험이 원인을 알려 준다
+    assert {x["cause"] for x in res["note_diff"] + res["note_blank"] if x["section"] == "5"} == {"주석 머리글에 묶음 이름이 빠짐"}
+    assert main(["link", "fix-headers", skel, out, "--json"]) == 1      # 목록만 - 정산표는 그대로
+    env = json.loads(capsys.readouterr().out)
+    assert env["cells"] == 2 and not env["applied"]
+    assert [(c["cell"], c["new"]) for c in env["tables"][0]["cells"]] == [("D%d" % r, "당기말 지분율(%)"), ("F%d" % r, "전기말 지분율(%)")]
+    assert openpyxl.load_workbook(out)["주석"].cell(r, 4).value == "지분율(%)"
+    before = {(c.coordinate, c.value) for row in openpyxl.load_workbook(out)["주석"].iter_rows() for c in row if c.row != r}
+    assert main(["link", "fix-headers", skel, out, "--apply", "--json"]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["applied"] and os.path.exists(env["backup"])
+    ws = openpyxl.load_workbook(out)["주석"]
+    assert [ws.cell(r, c).value for c in range(2, 7)] == ["주주명", "당기말 주식수", "당기말 지분율(%)", "전기말 주식수", "전기말 지분율(%)"]
+    assert {(c.coordinate, c.value) for row in ws.iter_rows() for c in row if c.row != r} == before   # 다른 칸은 그대로
+    res = roundtrip.run(skel, out, notes=True)
+    assert [x for x in res["note_diff"] + res["note_blank"] if x["section"] == "5"] == []
+    assert main(["link", "fix-headers", skel, out]) == 0                 # 다시 돌리면 고칠 것 없음
+
+
+def test_note_headers_keep_period_in_lower_row(tmp_path):
+    """기간이 아래 줄에 있는 두 줄 머리글('금액' 아래 '당기 · 전기')은 그대로 둔다 - 묶음을 붙이면 fill 이 열을 못 고른다."""
+    head1 = ["||ROWSPAN=2||구  분", "||COLSPAN=2||금액"]
+    head2 = ["당기", "전기"]
+    body = [["예금", "", "500"], ["합  계", "", "500"]]
+    crlf = "\r\n"
+    extra = (crlf + p("6. 예금") + crlf + crlf + table([head1, head2], body, ncols=3)).encode("utf-8")
+    extra = extra.replace(b'<TD ALIGN="LEFT"/>', b'<TD ALIGN="RIGHT"></TD>')
+    skel = tmp_path / "skel.dsd"
+    write_dsd(skel, LF.skeleton_contents().replace(b"\r\n</DOCUMENT>", extra + b"\r\n</DOCUMENT>"))
+    tb, info = tbsrc.load(LF.write_tb(tmp_path / "tb.json"))
+    wb, _ = core.make(_doc(str(skel)), tb, info)
+    ws = wb["주석"]
+    heads = [[core.squeeze(ws.cell(r, c).value) for c in range(2, 5)] for r in range(1, ws.max_row + 1)
+             if core.squeeze(ws.cell(r, 2).value) == "구분" and "금액" in core.squeeze(ws.cell(r, 3).value)]
+    assert heads == [["구분", "금액당기", "전기"]]
+    out = str(tmp_path / "정산표.xlsx")
+    wb.save(out)
+    assert main(["link", "fix-headers", str(skel), out]) == 0
+    res = roundtrip.run(str(skel), out, notes=True)
+    assert [x for x in res["note_diff"] + res["note_blank"] if x["section"] == "6"] == []

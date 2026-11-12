@@ -50,7 +50,7 @@ Windows에서 [uv](https://docs.astral.sh/uv/)로 설치한다. Python(3.11 이�
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 
 # dsdxlsx 설치 - 버전을 태그로 고정
-uv tool install git+https://github.com/procpalee/dsdxlsx@v0.6.1
+uv tool install git+https://github.com/procpalee/dsdxlsx@v0.6.2
 dsdxlsx --version
 ```
 
@@ -184,10 +184,15 @@ uv run --no-editable dsdxlsx link make 뼈대.dsd --tb tb.json [--company 회사
 uv run --no-editable dsdxlsx link test 뼈대.dsd 뼈대_정산표.xlsx [--config 설정.json] [--notes] [-o 결과.xlsx]
 uv run --no-editable dsdxlsx link refresh 뼈대_정산표.xlsx --tb tb.json
 uv run --no-editable dsdxlsx link back 보고서.dsd 정산표.xlsx [--apply] [--map 기록]
+uv run --no-editable dsdxlsx link fix-headers 뼈대.dsd 정산표.xlsx [--apply]
 #    make: 시트 TB(계정 → 'DSD 행') · BS · IS · SCE · CF · 주석 · 연결점검. 재무제표 시트의 행은 뼈대 DSD 행 순서 그대로이고
 #      머리말 회사명은 --company, 안 주면 DSD 에 적힌 회사명.
 #    test: 어긋난 칸마다 원인을 붙인다 - '연결점검 항목'(make 가 이미 알린 과목)과 '위 줄을 따라 바뀜'(그 합계),
-#      '주석 - 당기 표와 전기 표가 따로'(변동표처럼 자리로만 비교되는 표), '채우지 못함', '확인 필요'(끊긴 연결). -o 결과 엑셀은 확인 필요부터.
+#      '주석 - 당기 표와 전기 표가 따로'(변동표처럼 자리로만 비교되는 표), '주석 머리글에 묶음 이름이 빠짐'(아래 fix-headers),
+#      '채우지 못함', '확인 필요'(끊긴 연결). -o 결과 엑셀은 확인 필요부터.
+#    fix-headers: 0.6.1 이하로 만든 정산표에서 두 줄 머리글 주석 표('당기말' 아래 '주식수 · 지분율')의 둘째 열부터 빠진
+#      묶음 이름을 채운다(그대로 두면 build 가 옆 열 값을 넣는다). 칸 글에 기간이 이미 있으면('금액' 아래 '당기') 그대로.
+#      기본은 고칠 칸 목록만, --apply 면 그 칸만 쓰고 사본을 _build 에.
 #      당기 칸은 TB 를 SUMIF 로 끌어온다. 합계 줄은 전기 금액으로 구성이 확인된 것만 수식, 아니면 입력칸(크림).
 #      짝짓기: 정산 과목 이름 = DSD 행 이름 → 전기 금액 → 남은 과목 묶음(최대 4개). 못 맞춘 것은 '연결점검' 시트와 종료코드 1.
 #      차감 계정(대손충당금 · 감가상각누계액)은 바로 위 자산과 짝, 재고 구성 줄(기초 · 매입 · 기말)은 재무상태표에서 수식.

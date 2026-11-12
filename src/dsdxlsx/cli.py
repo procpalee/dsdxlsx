@@ -1414,6 +1414,43 @@ def cmd_link_test(args) -> int:
     return 1 if bad else 0
 
 
+def cmd_link_fix_headers(args) -> int:
+    """0.6.1 이하로 만든 정산표의 두 줄 머리글 고치기 - 고칠 칸 목록을 내고 --apply 면 그 칸만 바꾼다."""
+    from openpyxl import load_workbook
+
+    from . import docview
+    from .link import headers
+
+    doc = docview.doc_dict(parse_contents(read_dsd(args.dsd).contents), source=os.path.basename(args.dsd))
+    wb = load_workbook(args.workbook, read_only=False)
+    try:
+        if "주석" not in wb.sheetnames:
+            raise guard.InputError("정산표에 주석 시트가 없습니다: %s" % args.workbook)
+        found = headers.find(doc, wb)
+    finally:
+        wb.close()
+    backup = None
+    if args.apply and found:
+        was_ours = guard.untouched(args.workbook)
+        backup = headers.apply(args.workbook, found)
+        if was_ours:
+            guard.remember(args.workbook)
+    cells = sum(len(x["cells"]) for x in found)
+    _note(args, outputs=[args.workbook] if backup else [], tables=found, cells=cells, applied=bool(backup), backup=backup)
+    if not found:
+        print("고칠 머리글이 없습니다 - 두 줄 머리글 주석 표의 열마다 묶음 이름이 있습니다.")
+        return 0
+    print(f"묶음 이름이 빠진 주석 머리글 {len(found)}줄 · {cells}칸")
+    for x in found[:40]:
+        print(f"  주석 {x['section']} {x['row']}행: " + ", ".join(f"{c['cell']} '{c['old']}' → '{c['new']}'" for c in x["cells"]))
+    if backup:
+        print(f"정산표에 고쳐 썼습니다: {args.workbook}\n  쓰기 전 사본: {backup}")
+        print("  엑셀에서 열어 저장한 뒤 build 하세요(수식의 저장된 계산값이 지워졌습니다).")
+        return 0
+    print("--apply 를 주면 이 칸들만 고쳐 씁니다(쓰기 전에 정산표 옆 _build 폴더에 사본을 둡니다).")
+    return 1
+
+
 def cmd_status(args) -> int:
     """build · fill 뒤에 DSD · 정산표 · 뼈대 가운데 무엇이 바뀌었고 다음에 무엇을 돌릴지(아무것도 쓰지 않는다)."""
     from . import srcmap
@@ -2050,6 +2087,13 @@ def main(argv=None) -> int:
     pt.add_argument("--force", action="store_true", help="결과 파일을 고친 흔적이 있어도 덮어씀")
     pt.add_argument("--json", action="store_true", help=json_help)
     pt.set_defaults(func=cmd_link_test)
+
+    pf = lsub.add_parser("fix-headers", help="0.6.1 이하로 만든 정산표의 두 줄 머리글 주석 표 - 둘째 열부터 빠진 묶음 이름(당기말 등)을 채운다")
+    pf.add_argument("dsd", help="뼈대 .dsd (이 정산표를 만든 것)")
+    pf.add_argument("workbook", help="정산표 .xlsx")
+    pf.add_argument("--apply", action="store_true", help="고칠 칸을 정산표에 쓴다(쓰기 전에 정산표 옆 _build 폴더에 사본)")
+    pf.add_argument("--json", action="store_true", help=json_help)
+    pf.set_defaults(func=cmd_link_fix_headers)
 
     pb = lsub.add_parser("back", help="DSD 에서 고친 숫자를 정산표로 - 반영 목록을 내고 --apply 면 값 칸에 쓴다")
     pb.add_argument("dsd", help="고친 .dsd (build · fill 의 출력 DSD 를 직접 고친 것, 또는 그 사본)")

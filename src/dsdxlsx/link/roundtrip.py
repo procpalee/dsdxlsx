@@ -144,7 +144,8 @@ def compare(built: dict, skeleton: dict) -> dict:
 
 
 FS_SHEET = {"재무상태표": "BS", "손익계산서": "IS", "포괄손익계산서": "IS", "현금흐름표": "CF"}
-CAUSES = ("연결점검 항목", "위 줄을 따라 바뀜", "주석 - 당기 표와 전기 표가 따로", "채우지 못함", "확인 필요")
+HEADER_CAUSE = "주석 머리글에 묶음 이름이 빠짐"
+CAUSES = ("연결점검 항목", "위 줄을 따라 바뀜", "주석 - 당기 표와 전기 표가 따로", HEADER_CAUSE, "채우지 못함", "확인 필요")
 
 
 def _checks(wb) -> set:
@@ -173,17 +174,22 @@ def _fs_kind(wb, section: str, label: str, nth: int) -> str:
     return "input"
 
 
-def explain(res: dict, workbook: str, fill_items=()) -> dict:
+def explain(res: dict, workbook: str, fill_items=(), skeleton_doc: dict | None = None) -> dict:
     """어긋난 칸마다 원인(cause)과, 채우기가 못 채웠으면 그 이유(why)를 붙이고 원인별 개수를 res["causes"] 에 둔다.
 
     재무제표: 정산표를 만들 때 '연결점검'에 올린 과목이면 '연결점검 항목', 그 밖의 어긋난 과목 줄은 '확인 필요'
     (못 채운 칸이면 '채우지 못함'). 다른 칸에서 계산하는 줄(합계 · 이어 받는 줄)은 어긋난 과목 줄이 있으면 '위 줄을
     따라 바뀜', 과목 줄이 모두 맞는데 계산 줄만 어긋나면 수식이 끊긴 것이라 '확인 필요'.
     주석: 당기 표와 전기 표가 따로 있는 표(변동표 등)는 '주석 - 당기 표와 전기 표가 따로' 로 따로 세고, 채우기가 못 채운
-    칸은 '채우지 못함'(이유 = fill 의 기록), 그 밖은 '확인 필요'."""
+    칸은 '채우지 못함'(이유 = fill 의 기록), 그 밖은 '확인 필요'. 뼈대 사전을 주면, 0.6.1 이하로 만든 정산표에서 두 줄
+    머리글의 묶음 이름이 빠진 표(`link fix-headers` 로 고침)의 칸은 '주석 머리글에 묶음 이름이 빠짐'."""
     wb = load_workbook(workbook, read_only=False)
     try:
         checks = _checks(wb)
+        bad_heads = set()
+        if skeleton_doc is not None:
+            from .headers import find as find_headers
+            bad_heads = {x["section"] for x in find_headers(skeleton_doc, wb)}
         why = {it.cell: it.how for it in fill_items if getattr(it, "cell", "") and it.verdict != "채움"}
         fs = res["diff"] + res["blank"]
         for x in fs:
@@ -205,6 +211,8 @@ def explain(res: dict, workbook: str, fill_items=()) -> dict:
         for x in res["note_diff"] + res["note_blank"]:
             if x.get("split"):
                 x["cause"] = "주석 - 당기 표와 전기 표가 따로"
+            elif x["section"] in bad_heads and "/" in (x.get("column") or ""):
+                x["cause"] = HEADER_CAUSE
             elif x.get("cell") in why:
                 x["cause"], x["why"] = "채우지 못함", why[x["cell"]]
             else:
@@ -249,10 +257,11 @@ def run(skeleton: str, workbook: str, *, conf: dict | None = None, recipe: dict 
         rep = B.build(skeleton, wp, out, recipe=recipe or {}, fill_conf=conf, side_sheets=sheets,
                       workdir=os.path.join(td, "wd"))
         dict_of = lambda p: docview.doc_dict(parse_contents(read_dsd(p).contents), source=p)  # noqa: E731
-        res = compare(dict_of(out), dict_of(skeleton))
+        sk = dict_of(skeleton)
+        res = compare(dict_of(out), sk)
         if not notes:
             res["note_same"], res["note_diff"], res["note_blank"] = 0, [], []
-        explain(res, workbook, getattr(rep.fill, "items", ()) or ())
+        explain(res, workbook, getattr(rep.fill, "items", ()) or (), sk)
         res["steps"] = list(rep.steps)
         res["warnings"] = list(rep.warnings)
         if notes and not n_notes:
