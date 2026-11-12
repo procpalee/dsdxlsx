@@ -397,3 +397,38 @@ def test_cli_make_picks_prior_column_from_skeleton_period(tmp_path, capsys):
     assert (code, env["tb_columns"], env["to_check"]) == (0, {"cur": "회사제시", "pri": "2025.12.31"}, [])
     code, out = _cli(capsys, "link", "make", skel, "--tb", p, "--tb-pri", "2024.12.31", "-o", str(tmp_path / "w2.xlsx"), "--json")
     assert code == 1 and json.loads(out)["to_check"]                     # 전기 열을 잘못 고르면 연결점검에 드러난다
+
+
+# ── 사람용 출력(회사명 · 왕복 시험 결과 엑셀) ───────────────
+
+def test_make_takes_company_from_dsd_when_not_given(tmp_path):
+    skel = LF.write_skeleton(tmp_path / "skel.dsd")
+    out = tmp_path / "정산표.xlsx"
+    assert main(["link", "make", skel, "--tb", LF.write_tb(tmp_path / "tb.json"), "-o", str(out)]) in (0, 1)
+    assert openpyxl.load_workbook(out)["BS"]["C2"].value == "합성테스트(주)"
+    assert main(["link", "make", skel, "--tb", str(tmp_path / "tb.json"), "-o", str(out), "--company", "다른이름"]) in (0, 1)
+    assert openpyxl.load_workbook(out)["BS"]["C2"].value == "다른이름"
+
+
+def test_test_writes_result_workbook(tmp_path, capsys):
+    skel, out, _ = _made(tmp_path)
+    rep = tmp_path / "결과" / "왕복시험.xlsx"
+    assert main(["link", "test", skel, out, "--notes", "-o", str(rep), "--json"]) == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["outputs"] == [str(rep)]
+    ws = openpyxl.load_workbook(rep)["왕복시험"]
+    assert [ws.cell(6, c).value for c in range(2, 6)] == ["재무제표", 49, 0, 0]
+    assert [ws.cell(7, c).value for c in range(2, 6)] == ["주석", 3, 0, 0]
+    assert ws.cell(10, 3).value == "해당 없음"
+
+    wb = openpyxl.load_workbook(out)                                       # 연결을 하나 끊으면 어긋난 칸이 목록에 나온다
+    tb = wb["TB"]
+    row = next(r for r in range(6, tb.max_row + 1) if tb.cell(r, 3).value == "외상매출금")
+    tb.cell(row, 5).value = None
+    wb.save(out)
+    assert main(["link", "test", skel, out, "-o", str(rep), "--json"]) == 1
+    capsys.readouterr()
+    ws = openpyxl.load_workbook(rep)["왕복시험"]
+    listed = {ws.cell(r, 5).value: ws.cell(r, 4).value for r in range(9, ws.max_row + 1) if ws.cell(r, 5).value}
+    assert listed.get("매출채권") in ("다름", "빈칸") and "자산총계" in listed
+    assert ws.cell(7, 2).value is None                                    # --notes 없이는 주석 줄이 없다

@@ -181,10 +181,11 @@ uv run --no-editable dsdxlsx tb 자료폴더 [--key 2025 | --key 202509 --date 2
 
 # 1-1f) 정산표 만들기: 뼈대 DSD 행 그대로 정산표를 만들어 TB 와 수식으로 잇는다
 uv run --no-editable dsdxlsx link make 뼈대.dsd --tb tb.json [--company 회사명] [--config 설정.json] [-o 정산표.xlsx]
-uv run --no-editable dsdxlsx link test 뼈대.dsd 뼈대_정산표.xlsx [--config 설정.json] [--notes]
+uv run --no-editable dsdxlsx link test 뼈대.dsd 뼈대_정산표.xlsx [--config 설정.json] [--notes] [-o 결과.xlsx]
 uv run --no-editable dsdxlsx link refresh 뼈대_정산표.xlsx --tb tb.json
 uv run --no-editable dsdxlsx link back 보고서.dsd 정산표.xlsx [--apply] [--map 기록]
 #    make: 시트 TB(계정 → 'DSD 행') · BS · IS · SCE · CF · 주석 · 연결점검. 재무제표 시트의 행은 뼈대 DSD 행 순서 그대로이고
+#      머리말 회사명은 --company, 안 주면 DSD 에 적힌 회사명.
 #      당기 칸은 TB 를 SUMIF 로 끌어온다. 합계 줄은 전기 금액으로 구성이 확인된 것만 수식, 아니면 입력칸(크림).
 #      짝짓기: 정산 과목 이름 = DSD 행 이름 → 전기 금액 → 남은 과목 묶음(최대 4개). 못 맞춘 것은 '연결점검' 시트와 종료코드 1.
 #      차감 계정(대손충당금 · 감가상각누계액)은 바로 위 자산과 짝, 재고 구성 줄(기초 · 매입 · 기말)은 재무상태표에서 수식.

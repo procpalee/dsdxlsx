@@ -1243,6 +1243,16 @@ def _link_side_conf(config: str | None, side: str) -> dict | None:
     return None
 
 
+def _dsd_company(pkg) -> str:
+    """DSD 에 적힌 회사명(meta.xml). 없으면 빈 글."""
+    from .foot.sections import company_name
+
+    try:
+        return company_name(pkg.meta)
+    except (KeyError, OSError, ValueError):
+        return ""
+
+
 def cmd_link_make(args) -> int:
     """뼈대 DSD + TB → DSD 행 그대로인 정산표(TB · BS · IS · SCE · CF · 주석 · 연결점검)."""
     import json
@@ -1255,9 +1265,11 @@ def cmd_link_make(args) -> int:
     guard.check_out([out], force=args.force, inputs=[args.dsd] + ([args.tb] if os.path.isfile(args.tb) else []))
     with open(args.dsd, "rb") as f:
         data = f.read()
-    parsed = parse_contents(read_dsd(args.dsd).contents)
+    pkg = read_dsd(args.dsd)
+    parsed = parse_contents(pkg.contents)
     per = P.detect_period(parsed)
     hint = "%04d.%02d.%02d" % (per.end[0] - 1, per.end[1], per.end[2]) if per else None   # 뼈대의 전기말
+    company = args.company or _dsd_company(pkg)
     tb, info, cons = _link_tb(args, hint)
     cons = cons or bool(per and per.consolidated)
     doc = docview.doc_dict(parsed, source=os.path.basename(args.dsd), data=data)
@@ -1266,7 +1278,7 @@ def cmd_link_make(args) -> int:
         labels = [x.strip() for x in args.labels.split(",")]
         if len(labels) != 6 or not all(labels):
             raise guard.InputError("--labels 는 머리말 이름표 6개를 쉼표로 줍니다(회사명,번호,시트,기준일,문서,작성자 순서)")
-    wb, summary = core.make(doc, tb, info, company=args.company or "", title=args.title, ref=args.ref or "",
+    wb, summary = core.make(doc, tb, info, company=company, title=args.title, ref=args.ref or "",
                             author=theme.author(), labels=labels, consolidated=cons, source=doc["file"],
                             sha256=doc.get("sha256", ""))
     theme.set_author(wb)
@@ -1343,6 +1355,8 @@ def cmd_link_test(args) -> int:
     from . import period as P
     from .link import calc, core, roundtrip
 
+    if args.out:
+        guard.check_out([args.out], force=args.force, inputs=[args.dsd, args.workbook])
     wb = load_workbook(args.workbook, read_only=True)
     try:
         if "TB" not in wb.sheetnames:
@@ -1369,7 +1383,20 @@ def cmd_link_test(args) -> int:
     except calc.CalcError as e:
         raise guard.InputError("%s - 이 수식은 엑셀 없이 계산할 수 없습니다" % e)
     bad = res["diff"] + res["blank"] + res["note_diff"] + res["note_blank"]
-    _note(args, warnings=res["warnings"], side=side, same=res["same"], diff=res["diff"], blank=res["blank"],
+    outputs = []
+    if args.out:
+        from . import theme
+        from .link import testreport
+
+        os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+        try:
+            testreport.write(args.out, res, side=side, notes=args.notes, company=_dsd_company(read_dsd(args.dsd)),
+                             author=theme.author())
+        except PermissionError:
+            raise guard.InputError("결과 파일이 열려 있어 저장하지 못했습니다 - 엑셀에서 닫고 다시 실행하세요: %s" % args.out) from None
+        guard.remember(args.out)
+        outputs.append(args.out)
+    _note(args, outputs=outputs, warnings=res["warnings"], side=side, same=res["same"], diff=res["diff"], blank=res["blank"],
           note_same=res["note_same"], note_diff=res["note_diff"], note_blank=res["note_blank"], steps=res["steps"])
     print(f"왕복 시험({side}) - 재무제표 같음 {res['same']}칸 · 다름 {len(res['diff'])}칸 · 빈칸 {len(res['blank'])}칸"
           + (f" / 주석 같음 {res['note_same']}칸 · 다름 {len(res['note_diff'])}칸 · 빈칸 {len(res['note_blank'])}칸" if args.notes else ""))
@@ -1378,6 +1405,8 @@ def cmd_link_test(args) -> int:
             print(f"  [{kind}] {x['section']} · {x['label']}: 결과 {x['built']} / 전기 {x['expected']}")
     if not bad:
         print("  정산표의 당기 칸이 DSD 당기 칸까지 모두 이어집니다.")
+    if args.out:
+        print(f"결과 저장: {args.out}")
     return 1 if bad else 0
 
 
@@ -2013,6 +2042,8 @@ def main(argv=None) -> int:
     pt.add_argument("--notes", action="store_true", help="주석 표의 당기 칸도 시험")
     pt.add_argument("--pairs", help="주석의 [당기 칸, 전기 칸] 짝 JSON - 연결 기록이 없는 정산표(이전 방식으로 만든 것)에")
     pt.add_argument("--workdir", help="시험 사본과 결과 DSD 를 남길 폴더(기본: 임시 폴더)")
+    pt.add_argument("-o", "--out", help="결과를 엑셀로도 남김(.xlsx) - 같음 · 다름 · 빈칸 칸 수와 어긋난 칸 목록")
+    pt.add_argument("--force", action="store_true", help="결과 파일을 고친 흔적이 있어도 덮어씀")
     pt.add_argument("--json", action="store_true", help=json_help)
     pt.set_defaults(func=cmd_link_test)
 

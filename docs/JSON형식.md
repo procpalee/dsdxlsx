@@ -190,7 +190,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `build` | `side`, `steps`, `map`, `map_counts`(cells·overridden·missing·unfilled) |
 | `tb` | `erp`(더존·세무사랑), `period`(cur·pri), `accounts`, `no_code`(계정코드를 못 찾아 코드 자리에 `*이름`을 둔 계정), `files`(읽은 파일), `rules`(쓴 규칙 파일, 안 썼으면 `null`). 경고가 있으면 종료코드 1, 자료가 모자라거나 부호합이 안 맞으면 2 |
 | `link make` | `side`, `sheets`, `accounts`, `note_tables`, `to_check`(sheet·label·issue·prior), `unlinked_tb`(DSD 행에 짝이 없는 TB 과목), TB가 표일 때 `tb_columns`(읽은 당기·전기 열의 머리글). `to_check`가 있으면 종료코드 1 |
-| `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1 |
+| `link test` | `side`, `same`, `diff`, `blank`, `note_same`, `note_diff`, `note_blank`, `steps`. `diff`·`blank` 항목은 `section`, `label`, `built`(결과 DSD 당기 칸), `expected`(뼈대 전기 칸). 하나라도 있으면 종료코드 1. `-o 결과.xlsx`를 주면 같은 내용을 엑셀 한 장(시트 `왕복시험` - 같음·다름·빈칸 칸 수와 어긋난 칸 목록)으로도 남기고 `outputs`에 싣는다 |
 | `link refresh` | `accounts`, `added`(새로 붙인 계정 코드). 새 계정이 있으면 종료코드 1 |
 | `status` | `in_sync`, `files`(dsd·skeleton·workbook·recipe마다 `file`, `state`: same·changed·missing, 기록이 없으면 `null`), `dsd_changes`(DSD가 바뀌었을 때 `link back`의 종류별 칸 수), `unmapped`(출처 기록에 없는 칸의 변경 수), `workbook_changes`(cells: 값이 달라진 출처 칸, no_values: 계산값이 없는 수식 칸), `next`(다음에 할 일), `made_by`. 맞으면 종료코드 0, 아니면 1 |
 | `link back` | `changes`(아래), `counts`(종류별 수), `unchanged`, `applied`(정산표에 쓴 칸 수), `backup`(쓰기 전 사본), `unmapped`(출처 기록에 없는 칸의 변경: cell·label·old·new), `map`. 사람이 볼 것이 남으면 종료코드 1 |
@@ -310,7 +310,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `dsd`, `skeleton`, `workbook`, `recipe` | 만든 때의 파일 이름(`file`), 경로(`path`), 내용(`sha256`). `status`가 그 뒤 파일이 바뀌었는지 볼 때 쓴다 |
 | `made_by` | 기록을 남긴 명령(`build`나 `fill`) |
 
-### link back 의 반영 목록
+### link back의 반영 목록
 
 `changes`의 항목은 DSD에서 바뀐 칸 하나다.
 
@@ -341,7 +341,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `blank` | 고친 칸이 비었거나 숫자가 아니다 | 안 쓴다 |
 | `moved` | 칸 번호가 밀렸다(DSD에서 행이나 표를 넣고 뺌). 하나라도 있으면 아무것도 쓰지 않는다 | 안 쓴다 |
 
-### link 의 TB (`dsdxlsx.tb/1`)
+### link의 TB (`dsdxlsx.tb/1`)
 
 `link make --tb`와 `link refresh --tb`가 받는 계정별 금액이다. 금액은 차변이 +, 대변이 -다.
 
