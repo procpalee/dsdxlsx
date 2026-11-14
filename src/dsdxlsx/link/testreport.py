@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from openpyxl import Workbook
 
-from .sheetkit import FIRST_COL, HDR_ROW, num_space, write_header, write_table
+from .sheetkit import FIRST_COL, HDR_ROW, fit_header, num_space, write_header, write_table
 
 SHEET = "왕복시험"
 ORDER = ("확인 필요", "주석 머리글에 묶음 이름이 빠짐", "채우지 못함", "연결점검 항목", "위 줄을 따라 바뀜",
@@ -66,6 +66,7 @@ def write(out: str, res: dict, *, side: str, notes: bool, company: str = "", aut
     # B · C 는 원인 · 위치와 머리말의 회사명, E 는 행 이름과 머리말의 문서 이름을 담는다
     for col, w in zip("BCDEFGH", (30, 30, 10, 44, 18, 18, 48)):
         ws.column_dimensions[col].width = w
+    fit_header(wb)
     ws.sheet_view.showGridLines = False
     if author:
         wb.properties.creator = author

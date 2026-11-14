@@ -147,3 +147,32 @@ def test_cli_view_option(tmp_path):
     assert main(["diff", str(a), str(b), "--view", "cards", "-o", str(out)]) == 0
     h = out.read_text(encoding="utf-8")
     assert "<body data-view='cards'>" in h and "나란히 보기에서 보기" in h
+
+
+def test_cli_json_lists_changed_cells(tmp_path, capsys):
+    import json
+
+    a, b = tmp_path / "a.dsd", tmp_path / "b.dsd"
+    F.write_dsd(a, F.document(F.p("6. 현금"), F.table([["구분", "당기", "전기"]], [["예금", "1,000", "900"]]),
+                              F.p("담보는 없습니다.")))
+    F.write_dsd(b, F.document(F.p("6. 현금"), F.table([["구분", "당기", "전기"]], [["예금", "1,200", "900"]]),
+                              F.p("담보 100 이 있습니다.")))
+    assert main(["diff", str(a), str(b), "-o", str(tmp_path / "r.html"), "--json"]) == 0
+    env = json.loads(capsys.readouterr().out)
+    rows = env["changes"]
+    assert env["total"] == len(rows) == 2 and "changes_truncated" not in env
+    row = next(r for r in rows if r["after"]["type"] == "row")
+    assert row["kind"] == "숫자" and row["section"] == "6. 현금" and row["after"]["label"] == "예금"
+    assert row["cols"] == [{"col": 1, "before": "1,000", "after": "1,200"}]
+    para = next(r for r in rows if r["after"]["type"] == "para")
+    assert para["before"]["text"] == "담보는 없습니다." and "cols" not in para
+
+
+def test_changes_json_puts_cosmetic_last_and_cuts():
+    a = _doc()
+    b = _doc(cash="1,200", spaced="대체된 금액", blank="")
+    rows, cut = D.changes_json(D.compare(a, b))
+    kinds = [r["kind"] for r in rows]
+    assert kinds[0] == "숫자" and kinds.index("공백") > kinds.index("숫자") and not cut
+    rows, cut = D.changes_json(D.compare(a, b), limit=1)
+    assert len(rows) == 1 and cut

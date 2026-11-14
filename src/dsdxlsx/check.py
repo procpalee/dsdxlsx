@@ -1302,6 +1302,83 @@ def _check_flow_columns(tv: TableView, report: CheckReport):
             )
 
 
+# 재무제표 사이 등식: 자산총계 = 부채와자본총계, 현금흐름표 기말 현금 = 재무상태표 현금
+_ASSET_TOTAL = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ\d]+\.)?자산(?:총계|합계)$")
+_LE_TOTAL = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ\d]+\.)?(?:부채(?:와|및)?자본|자본(?:과|및)?부채)(?:총계|합계)$")
+_BS_CASH = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ\d]+\.|\(\d+\))?현금및현금(?:성자산|등가물)$")
+_CF_END = re.compile(r"^(?:[ⅠⅡⅢⅣⅤⅥⅦⅧⅨⅩ\d]+\.)?기말(?:의)?현금(?:및현금(?:성자산|등가물))?$")
+
+
+def _rows(tv: TableView, pat) -> list[int]:
+    return [i for i in tv.body if pat.match(_label_core(tv.row_label(i)))]
+
+
+def _bucket_values(tv: TableView, i: int) -> dict[tuple, list[tuple[int, int]]]:
+    """{(당기·전기, 중간기간 여부): [(열, 값)]} - 분·반기 보고서의 전기 열은 현금흐름표가 전년 동기,
+    재무상태표가 전기말이라 날짜가 달라 견주지 않는다(머리글에 분기 · 반기가 있는지로 가름)."""
+    out: dict[tuple, list[tuple[int, int]]] = {}
+    for c in range(tv.ncols):
+        v, b = tv.value(i, c), tv.period_bucket(c)
+        if v is not None and b is not None and tv.text(i, c).strip() not in ("", "-"):
+            interim = bool(re.search(r"분기|반기", norm(tv.col_header(c))))
+            out.setdefault((b, interim), []).append((c, v))
+    return out
+
+
+def check_cross_statements(views: list[TableView], report: CheckReport):
+    """연결 · 별도마다 재무상태표 대차와 현금흐름표 기말 현금 ↔ 재무상태표 현금을 본다."""
+    groups: dict[bool, dict[str, list[TableView]]] = {}
+    for tv in views:
+        if _skip_section(tv):
+            continue
+        t = norm(tv.sec_title)
+        kind = "bs" if "재무상태표" in t else "cf" if "현금흐름표" in t else None
+        if kind:
+            groups.setdefault("연결" in t or "연결" in norm(tv.context), {}).setdefault(kind, []).append(tv)
+    for g in groups.values():
+        cash: dict[str, set[int]] = {}
+        for tv in g.get("bs", []):
+            assets, le = _rows(tv, _ASSET_TOTAL), _rows(tv, _LE_TOTAL)
+            if len(assets) == 1 and len(le) == 1:
+                a, b = assets[0], le[0]
+                av, lv = _bucket_values(tv, a), _bucket_values(tv, b)
+                for bucket, cols in lv.items():
+                    if bucket not in av:
+                        continue
+                    for c, stated in cols:
+                        ca, target = next(((cc, v) for cc, v in av[bucket] if cc == c), av[bucket][-1])
+                        report.tick("C7")
+                        ok = abs(stated - target) <= _P.footing_tol
+                        report.result("C7", tv, b, c, stated, target, ok, "대차 - 자산총계와 같아야 함",
+                                      terms=[(a, ca, 1)])
+                        if not ok:
+                            report.add("C7", "warn", tv.where(b, c),
+                                       f"대차 불일치: 자산총계 {fmt(target)} ≠ {tv.row_label(b)[:20]} {fmt(stated)}"
+                                       f" (차이 {fmt(stated - target)})")
+            for i in _rows(tv, _BS_CASH):
+                for bucket, cols in _bucket_values(tv, i).items():
+                    cash.setdefault(bucket, set()).update(v for _, v in cols)
+        if not cash:
+            continue
+        for tv in g.get("cf", []):
+            ends = _rows(tv, _CF_END)
+            if not ends:
+                continue
+            i = ends[-1]
+            for bucket, cols in _bucket_values(tv, i).items():
+                if bucket not in cash:
+                    continue
+                for c, stated in cols:
+                    report.tick("C7")
+                    near = min(cash[bucket], key=lambda v: abs(v - stated))
+                    ok = abs(near - stated) <= _P.footing_tol
+                    report.result("C7", tv, i, c, stated, near, ok, "기말 현금 - 재무상태표 현금및현금성자산")
+                    if not ok:
+                        report.add("C7", "warn", tv.where(i, c),
+                                   f"현금흐름표 기말 현금 {fmt(stated)} ≠ 재무상태표 현금및현금성자산 {fmt(near)}"
+                                   f" (차이 {fmt(stated - near)})")
+
+
 def check_statement_lines(views: list[TableView], report: CheckReport):
     for tv in views:
         if _skip_section(tv):
@@ -1393,7 +1470,7 @@ CHECK_NAMES = {
     "C1": "자동합계(AUTOSUM) 검산",
     "C2": "그룹 footing (들여쓰기·로마자 계층)",
     "C3": "합계행·합계열 footing",
-    "C7": "재무제표 계산 라인 검증 (손익·자본변동·현금흐름)",
+    "C7": "재무제표 계산 라인 검증 (손익·자본변동·현금흐름, 대차·기말 현금)",
     "C4": "재무제표↔주석 대사 (참조번호 오류 감지)",
     "C5": "주석↔주석 대사",
     "C8": "대사맵 (확정 대사쌍 검증)",
@@ -1429,7 +1506,8 @@ def run_checks(doc: Document, only: set[str] | None = None,
             "C2": lambda: check_group_footing(views, report),
             "C3": lambda: (check_total_rows(views, report),
                            check_total_columns(views, report)),
-            "C7": lambda: check_statement_lines(views, report),
+            "C7": lambda: (check_statement_lines(views, report),
+                           check_cross_statements(views, report)),
             "C4": lambda: check_fs_to_notes(ctx, report),
             "C5": lambda: check_note_to_note(ctx, report),
             "C6": lambda: check_format(doc, views, report),

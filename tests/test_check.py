@@ -163,3 +163,78 @@ def test_separate_report_option(doc, tmp_path):
     first = list(wb["검증결과"].iter_rows(min_row=2, max_row=1 + stats["bad"], values_only=True))
     assert all(isinstance(r[7], (int, float)) and r[7] != 0 for r in first)  # 차이 금액
     wb.close()
+
+
+# ── 재무제표 사이 등식(대차 · 기말 현금) ─────────────────────────
+
+def _fs_doc(*, le_total="6,000", cf_end="1,000", interim=False):
+    from fixtures import factory as F
+
+    cur, pri = ("제 2(당) 기 1분기말", "제 1(전) 기말") if interim else ("제 2(당) 기말", "제 1(전) 기말")
+    cf_cur, cf_pri = ("제 2(당) 기 1분기", "제 1(전) 기 1분기") if interim else ("제 2(당) 기", "제 1(전) 기")
+    bs = F.table([["과  목", cur, pri]], [
+        ["Ⅰ.유동자산", "6,000", "4,900"],
+        ["   현금및현금성자산", "1,000", "900"],
+        ["   매출채권", "5,000", "4,000"],
+        ["자산총계", "6,000", "4,900"],
+        ["부채총계", "2,000", "1,900"],
+        ["자본총계", "4,000", "3,000"],
+        ["부채와자본총계", le_total, "4,900"],
+    ], unit="원")
+    cf = F.table([["과  목", cf_cur, cf_pri]], [
+        ["Ⅰ.영업활동현금흐름", "100", "50"],
+        ["Ⅱ.현금의증가", "100", "50"],
+        ["Ⅲ.기초의현금", "900", "850" if interim else "850"],
+        ["Ⅳ.기말의현금", cf_end, "700" if interim else "900"],
+    ], unit="원")
+    return parse_contents(F.document(
+        F.title("재무제표", 2), F.statement_title_table("재 무 상 태 표"), bs,
+        F.statement_title_table("현 금 흐 름 표"), cf))
+
+
+def _cross(doc):
+    from dsdxlsx.check import CheckReport, build_views, check_cross_statements
+
+    views, _ = build_views(doc)
+    r = CheckReport()
+    check_cross_statements(views, r)
+    return r
+
+
+def test_cross_statements_balanced():
+    r = _cross(_fs_doc())
+    notes = sorted(x.note[:2] for x in r.results)
+    assert notes == ["기말", "기말", "대차", "대차"] and all(x.ok for x in r.results)
+    assert r.findings == []
+
+
+def test_cross_statements_catch_imbalance_and_cash():
+    r = _cross(_fs_doc(le_total="6,100", cf_end="1,100"))
+    bad = [x for x in r.results if not x.ok]
+    assert {x.note[:2] for x in bad} == {"대차", "기말"}
+    assert {x.stated - x.computed for x in bad} == {100}
+    assert len([f for f in r.findings if f.level == "warn"]) == 2
+
+
+def test_cross_statements_interim_prior_columns_not_compared():
+    # 분기: 현금흐름표 전기 열은 전년 동기(700), 재무상태표 전기 열은 전기말(900) - 견주지 않는다
+    r = _cross(_fs_doc(interim=True))
+    assert all(x.ok for x in r.results)
+    assert sum(1 for x in r.results if x.note.startswith("기말")) == 1
+
+
+def test_cli_check_json_lists_statement_ties(tmp_path, capsys):
+    import json
+
+    from dsdxlsx.cli import main
+    from fixtures import factory as F
+
+    p = tmp_path / "a.dsd"
+    bs = F.table([["과  목", "제 2(당) 기말", "제 1(전) 기말"]], [
+        ["현금및현금성자산", "1,000", "900"], ["자산총계", "1,000", "900"],
+        ["부채총계", "400", "300"], ["자본총계", "600", "600"], ["부채와자본총계", "1,100", "900"]], unit="원")
+    F.write_dsd(p, F.document(F.title("재무제표", 2), F.statement_title_table("재 무 상 태 표"), bs))
+    assert main(["check", str(p), "--json"]) == 1
+    ties = json.loads(capsys.readouterr().out)["statement_ties"]
+    assert [(t["check"], t["ok"]) for t in ties] == [("대차", False), ("대차", True)]
+    assert ties[0]["stated"] == 1100 and ties[0]["computed"] == 1000

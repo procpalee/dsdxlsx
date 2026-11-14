@@ -243,3 +243,14 @@ def test_cli_input_errors_are_2(tmp_path, capsys):
     (tmp_path / "bad.json").write_text("{not json", encoding="utf-8")
     assert main(["apply", str(tmp_path / "a.dsd"), str(tmp_path / "bad.json")]) == result.INPUT_ERROR
     assert not (tmp_path / "a_수정.dsd").exists()
+
+
+def test_cli_dry_run_json_shows_before_and_after(tmp_path, capsys):
+    from dsdxlsx.parse import parse_contents
+
+    doc = parse_contents(demo_contents())
+    before = doc.nodes["t003.r004.c02"].text
+    label = next(c.text.strip() for c in doc.rows["t003.r004"].cells if c.text.strip())
+    assert _cli(tmp_path, [{"op": "set", "cell": "t003.r004.c02", "value": 1000}], "--dry-run", "--json") == 0
+    env = json.loads(capsys.readouterr().out)
+    assert env["cells"] == [{"cell": "t003.r004.c02", "label": label, "before": before, "after": "1,000"}]

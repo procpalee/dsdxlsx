@@ -189,6 +189,31 @@ def cmd_inspect(args) -> int:
     return 0
 
 
+def _cell_diffs(old: bytes, new: bytes, ids, *, same_ids: bool) -> list[dict]:
+    """고친 칸마다 행 이름 · 전 · 후 - 미리보기에서 바뀔 값을 바로 보이게.
+    구조 편집으로 ID가 다시 매겨졌으면 전 값만 싣는다(같은 ID가 다른 칸일 수 있음)."""
+    if not ids:
+        return []
+    a = parse_contents(old)
+    b = parse_contents(new) if same_ids else None
+
+    def label(doc, rid):
+        row = doc.rows.get(rid)
+        return next((c.text.strip() for c in row.cells if c.text.strip()), "") if row else ""
+
+    out = []
+    for cid in ids:
+        rid = cid.rsplit(".", 1)[0]
+        before = a.nodes.get(cid)
+        after = b.nodes.get(cid) if b is not None else None
+        row = {"cell": cid, "label": label(a, rid) or (label(b, rid) if b is not None else ""),
+               "before": before.text if before is not None else None}
+        if b is not None:
+            row["after"] = after.text if after is not None else None
+        out.append(row)
+    return out
+
+
 def cmd_apply(args) -> int:
     import json
 
@@ -228,7 +253,9 @@ def cmd_apply(args) -> int:
     if args.json:
         return R.emit(R.envelope("apply", R.OK, outputs=outputs, warnings=warnings,
                                  dry_run=args.dry_run, changed=res.report.changed,
-                                 changes=res.changes(), structural=res.report.structural))
+                                 changes=res.changes(), structural=res.report.structural,
+                                 cells=_cell_diffs(package.contents, res.contents, res.report.cell_edits,
+                                                   same_ids=not res.report.structural)))
     print(("[미리보기] " if args.dry_run else "") + (f"저장: {out}" if outputs else "쓰지 않음"))
     for k, v in res.changes().items():
         print(f"  {k}: {len(v)}건 - " + ", ".join(map(str, v[:8])) + (" …" if len(v) > 8 else ""))
@@ -609,6 +636,11 @@ def cmd_check(args) -> int:
                        "stated": _num(r.stated), "computed": _num(r.computed), "note": r.note}
                       for r in report.results if not r.ok and (only is None or r.check in only)],
           suppressed=len(report.suppressed), tie_suggestions=n_sugg, log=False,
+          statement_ties=[{"check": r.note.split(" - ")[0], "section": r.context, "label": r.row_label,
+                           "header": r.col_header, "stated": _num(r.stated), "computed": _num(r.computed),
+                           "ok": r.ok}
+                          for r in report.results if r.check == "C7" and r.note.startswith(("대차", "기말 현금"))
+                          and (only is None or "C7" in only)],
           coverage={"tables": len(report.coverage),
                     "checked": sum(1 for c in report.coverage if c["checks"]),
                     "unchecked": [c["table"] for c in report.coverage
@@ -1633,8 +1665,10 @@ def cmd_diff(args) -> int:
         f.write(D.render_html(d, labels, (os.path.basename(args.a), os.path.basename(args.b),
                                           os.path.basename(args.base) if args.base else None), view=args.view))
     s = D.summary(changes)
+    rows, cut = D.changes_json(changes)
     _note(args, outputs=[out], total=s["total"],
-          by_kind={D.KINDS[k][0]: n for k, n in s["by_kind"].items()})
+          by_kind={D.KINDS[k][0]: n for k, n in s["by_kind"].items()},
+          changes=rows, **({"changes_truncated": True} if cut else {}))
     print(f"바뀐 곳 {s['total']}건 - " + " · ".join(f"{D.KINDS[k][0]} {n}" for k, n in s["by_kind"].items()))
     print(f"보고서: {out}")
     return 0

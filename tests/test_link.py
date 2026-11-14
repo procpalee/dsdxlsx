@@ -555,3 +555,15 @@ def test_note_headers_keep_period_in_lower_row(tmp_path):
     assert main(["link", "fix-headers", str(skel), out]) == 0
     res = roundtrip.run(str(skel), out, notes=True)
     assert [x for x in res["note_diff"] + res["note_blank"] if x["section"] == "6"] == []
+
+
+def test_make_widens_column_for_long_company_name(tmp_path):
+    skel = LF.write_skeleton(tmp_path / "skel.dsd")
+    tb, info = tbsrc.load(LF.write_tb(tmp_path / "tb.json", LF.TB))
+    long_name = "합성테스트 아주 긴 이름의 주식회사"
+    wb, _ = core.make(_doc(skel), tb, info, company=long_name)
+    for ws in wb.worksheets:
+        if ws.cell(2, 3).value == long_name:
+            assert ws.column_dimensions["C"].width >= 2 * 15, ws.title
+    short, _ = core.make(_doc(skel), tb, info, company="합성(주)")
+    assert short["BS"].column_dimensions["C"].width == 18

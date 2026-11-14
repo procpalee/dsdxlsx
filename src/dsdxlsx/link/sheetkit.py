@@ -56,6 +56,25 @@ def write_header(ws, meta: dict, title: str) -> int:
     return HDR_ROW
 
 
+def _text_width(text: str) -> float:
+    """엑셀 열너비 단위로 어림 - 한글·전각은 2, 그 밖은 1.1."""
+    return sum(2.0 if ord(ch) > 0x2E80 else 1.1 for ch in str(text))
+
+
+def fit_header(wb) -> None:
+    """머리말(2~3행) 값 칸이 열보다 넓으면 그 열을 넓힌다 - 열너비를 다 정한 뒤 부른다."""
+    for ws in wb.worksheets:
+        for r in (2, 3):
+            for col in (FIRST_COL + 1, FIRST_COL + 3, FIRST_COL + 5):
+                v = ws.cell(r, col).value
+                if v in (None, "") or str(v).startswith("="):
+                    continue
+                letter = get_column_letter(col)
+                need = _text_width(v) + 2
+                if (ws.column_dimensions[letter].width or 8.43) < need:
+                    ws.column_dimensions[letter].width = round(need, 1)
+
+
 def write_table(ws, headers, rows, *, header_row: int = HDR_ROW, number_cols: dict | None = None) -> None:
     """headers 와 rows(2차원)를 B열부터 쓴다. number_cols = {열 순번(0부터): 'accounting' 또는 서식 글}.
     가로줄만 긋는다 - 머리글 위와 마지막 줄 아래는 굵게, 나머지는 가늘게."""

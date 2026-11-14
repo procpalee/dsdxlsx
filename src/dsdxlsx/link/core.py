@@ -15,7 +15,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment
 
 from ..guard import InputError
-from .sheetkit import HDR_ROW, mark_cells, num_space, write_header, write_section_bar, write_table
+from .sheetkit import HDR_ROW, fit_header, mark_cells, num_space, write_header, write_section_bar, write_table
 
 ACCT = "accounting"
 LINK_SHEET = "_link"
@@ -975,6 +975,7 @@ def make(doc: dict, tb: list, info: dict, *, company: str = "", title: str | Non
     _, chk = check_sheet(wb, meta, bs, is_, left, m)
     side = "연결" if consolidated else "별도"
     link_sheet(wb, side=side, source=source, sha256=sha256, note_pairs=note_pairs)
+    fit_header(wb)
     unlinked = [s for s, a in left.items() if a != 0 and not MFG_RE.search(s)]
     summary = {"side": side, "sheets": sheets + ["주석", "연결점검"], "accounts": len(tb), "note_tables": n_tab,
                "to_check": [{"sheet": r[0], "label": r[1], "issue": r[2], "prior": r[3]} for r in chk],

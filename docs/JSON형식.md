@@ -180,10 +180,10 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 
 | 명령 | 더해지는 필드 |
 |---|---|
-| `apply` | `dry_run`, `changed`, `structural`, `changes` |
+| `apply` | `dry_run`, `changed`, `structural`, `changes`, `cells`(고친 칸마다 `cell`, `label`(행 이름), `before`, `after` - `--dry-run`에도 나온다. 구조를 바꾼 편집이 섞이면 칸 ID가 다시 매겨져 `after`는 빠진다) |
 | `import` | `changed`, `structural`, `changes`. 풋팅 워크북이면 `kind: "foot"`, `source`, `changed`, `edits`(cell·node·old·new) |
 | `export` | `sheets`, `tables`, `paras` |
-| `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage` |
+| `check` | `counts`, `findings`, `mismatches`, `suppressed`, `tie_suggestions`, `coverage`, `statement_ties`(재무제표 사이 등식을 본 칸마다 `check`(`대차`나 `기말 현금`), `section`, `label`, `header`, `stated`, `computed`, `ok` - 맞은 것도 싣는다. 비어 있으면 그 행을 찾지 못해 보지 않은 것) |
 | `foot` | `files`: 파일마다 `file`, `output`, `company`, `sheets`, `exit_code`, `footing`(total·pass·rounding·fail), `cross`(total·pass·fail), `mismatches`(kind·sheet·cell·label·diff). 실패한 파일은 `error`. `--dart-tie`면 `dart`(status·reason·total·pass·fail·sources·unmatched)가 붙고 `mismatches`에 `kind: "dart"`(current·dart 값 포함)가 더해진다. 건너뛴 사유는 `warnings`. `--review`면 `review`(path·items·note_sheets·texts·texts_truncated) |
 | `recon` | `period`, `side`, `items`, `issues`, `counts`, `to_check`, `sheets`, `config_written` |
 | `fill` | `period`, `side`, `counts`, `unfilled`, `map`(칸별 출처 기록 파일 경로 - `outputs`에도 들어 있다) |
@@ -198,7 +198,7 @@ JSON 배열이나 `{"edits": [...]}`. 위에서부터 차례로 적용하고, �
 | `rollforward`, `roll-interim` | `counts`(자동확정·확인필요·미처리), `painted`, `todo`. `roll-interim`은 `period`, `dart`도 |
 | `renumber` | `notes`, `mapping`, `mentions`, `headings`, `ref_cells` |
 | `refoot` | `applied`, `items`, `skipped` |
-| `diff` | `total`, `by_kind` |
+| `diff` | `total`, `by_kind`, `changes`(바뀐 곳마다 `kind`(숫자, 글, 추가, 삭제, 그리고 표시만 다른 공백, '-'·빈 칸, 병합·칸 - 표시만 다른 것은 뒤에), `section`, `before`와 `after`(표 행이면 `type: "row"`, `id`, `label`, `cells`. 문단이면 `type: "para"`, `id`, `text`. 없으면 `null`), 표 행끼리면 달라진 칸 `cols`(`col`, `before`, `after`), `--base`를 주면 `base`). 500건을 넘으면 앞 500건만 싣고 `changes_truncated: true` |
 | `verify` | `same`, `differences` |
 | `disc` | `form`, `listed`, `interim`, `counts` |
 | `dart` | 아래 |

@@ -258,6 +258,35 @@ def summary(changes: list[Change]) -> dict:
     return {"total": len(changes), "by_kind": by_kind, "by_note": by_note}
 
 
+CHANGE_LIMIT = 500
+
+
+def _item_json(it: Item | None) -> dict | None:
+    if it is None:
+        return None
+    if it.kind == "p":
+        return {"type": "para", "id": it.ref, "text": it.cells[0]}
+    return {"type": "row", "id": it.ref, "label": next((c for c in it.cells if c.strip()), ""),
+            "cells": list(it.cells)}
+
+
+def changes_json(changes: list[Change], limit: int = CHANGE_LIMIT) -> tuple[list[dict], bool]:
+    """봉투용 바뀐 곳 목록 - 숫자·글·추가·삭제를 먼저, 표시만 다른 것(공백·'-'·병합)을 뒤에.
+    표 행끼리 바뀐 것은 달라진 칸(cols: col·before·after)도 싣는다. limit 를 넘으면 자르고 True."""
+    order = sorted(changes, key=lambda c: (KINDS.get(c.kind, ("", False))[1], c.idx))
+    out: list[dict] = []
+    for c in order[:limit]:
+        row = {"kind": KINDS.get(c.kind, (c.kind,))[0], "section": c.note,
+               "before": _item_json(c.a), "after": _item_json(c.b)}
+        if c.a and c.b and c.a.kind == c.b.kind == "row":
+            row["cols"] = [{"col": i, "before": x or "", "after": y or ""}
+                           for i, (x, y) in enumerate(zip_longest(c.a.cells, c.b.cells)) if (x or "") != (y or "")]
+        if c.base:
+            row["base"] = c.base
+        out.append(row)
+    return out, len(order) > limit
+
+
 # ── HTML 공통 ─────────────────────────────────────────
 
 def _e(t) -> str:
